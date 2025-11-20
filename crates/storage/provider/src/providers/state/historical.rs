@@ -1,6 +1,7 @@
 use crate::{
-    providers::state::macros::delegate_provider_impls, AccountReader, BlockHashReader,
-    HashedPostStateProvider, ProviderError, StateProvider, StateRootProvider,
+    providers::{state::macros::delegate_provider_impls, triedb::triedb_account_to_reth},
+    AccountReader, BlockHashReader, HashedPostStateProvider, ProviderError, StateProvider,
+    StateRootProvider, TrieDbTxProvider,
 };
 use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
@@ -29,6 +30,7 @@ use reth_trie_db::{
     DatabaseStorageProof, DatabaseStorageRoot, DatabaseTrieWitness, StateCommitment,
 };
 use std::fmt::Debug;
+use triedb::path::{AddressPath, StoragePath};
 
 /// State provider for a given block number which takes a tx reference.
 ///
@@ -244,8 +246,8 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'_, Provi
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader + StateCommitmentProvider> AccountReader
-    for HistoricalStateProviderRef<'_, Provider>
+impl<Provider: DBProvider + TrieDbTxProvider + BlockNumReader + StateCommitmentProvider>
+    AccountReader for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
@@ -262,7 +264,15 @@ impl<Provider: DBProvider + BlockNumReader + StateCommitmentProvider> AccountRea
                 })?
                 .info),
             HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => {
-                Ok(self.tx().get_by_encoded_key::<tables::PlainAccountState>(address)?)
+                tracing::trace!(
+                    "HistoricalStateProviderRef::basic_account: Reading account from TrieDB at {}",
+                    address
+                );
+                let address_path = AddressPath::for_address(*address);
+                match self.provider.triedb_tx_ref().get_account(address_path)? {
+                    Some(account) => Ok(Some(triedb_account_to_reth(&account))),
+                    None => Ok(None),
+                }
             }
         }
     }
@@ -401,8 +411,9 @@ impl<Provider: StateCommitmentProvider> HashedPostStateProvider
     }
 }
 
-impl<Provider: DBProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider>
-    StateProvider for HistoricalStateProviderRef<'_, Provider>
+impl<
+        Provider: DBProvider + TrieDbTxProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider,
+    > StateProvider for HistoricalStateProviderRef<'_, Provider>
 {
     /// Get storage.
     fn storage(
@@ -424,13 +435,16 @@ impl<Provider: DBProvider + BlockNumReader + BlockHashReader + StateCommitmentPr
                     })?
                     .value,
             )),
-            HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => Ok(self
-                .tx()
-                .cursor_dup_read::<tables::PlainStorageState>()?
-                .seek_by_key_subkey(address, storage_key)?
-                .filter(|entry| entry.key == storage_key)
-                .map(|entry| entry.value)
-                .or(Some(StorageValue::ZERO))),
+            HistoryInfo::InPlainState | HistoryInfo::MaybeInPlainState => {
+                tracing::warn!("HistoricalStateProviderRef::storage: Reading storage from TrieDB");
+                let address_path = AddressPath::for_address(address);
+                let storage_path =
+                    StoragePath::for_address_path_and_slot(address_path, storage_key);
+                match self.provider.triedb_tx_ref().get_storage_slot(storage_path)? {
+                    Some(value) => Ok(Some(value)),
+                    None => Ok(Some(StorageValue::ZERO)),
+                }
+            }
         }
     }
 
@@ -502,7 +516,7 @@ impl<Provider: StateCommitmentProvider> StateCommitmentProvider
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
-delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider]);
+delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + TrieDbTxProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider]);
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.
@@ -538,6 +552,7 @@ mod tests {
         providers::state::historical::{HistoryInfo, LowestAvailableBlocks},
         test_utils::create_test_provider_factory,
         AccountReader, HistoricalStateProvider, HistoricalStateProviderRef, StateProvider,
+        TrieDbTxProvider,
     };
     use alloy_primitives::{address, b256, Address, B256, U256};
     use reth_db_api::{
@@ -561,7 +576,7 @@ mod tests {
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
     const fn assert_historical_state_provider<
-        T: DBProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider,
+        T: DBProvider + TrieDbTxProvider + BlockNumReader + BlockHashReader + StateCommitmentProvider,
     >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
     }

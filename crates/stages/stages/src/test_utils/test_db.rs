@@ -1,7 +1,10 @@
 use alloy_primitives::{keccak256, Address, BlockNumber, TxHash, TxNumber, B256, U256};
 use reth_chainspec::MAINNET;
 use reth_db::{
-    test_utils::{create_test_rw_db, create_test_rw_db_with_path, create_test_static_files_dir},
+    test_utils::{
+        create_test_rw_db, create_test_rw_db_with_path, create_test_static_files_dir,
+        create_test_triedb_dir,
+    },
     DatabaseEnv,
 };
 use reth_db_api::{
@@ -17,14 +20,14 @@ use reth_db_api::{
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_primitives_traits::{Account, SealedBlock, SealedHeader, StorageEntry};
 use reth_provider::{
-    providers::{StaticFileProvider, StaticFileProviderRWRefMut, StaticFileWriter},
+    providers::{StaticFileProvider, StaticFileProviderRWRefMut, StaticFileWriter, TrieDbProvider},
     test_utils::MockNodeTypesWithDB,
     HistoryWriter, ProviderError, ProviderFactory, StaticFileProviderFactory,
 };
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_errors::provider::ProviderResult;
 use reth_testing_utils::generators::ChangeSet;
-use std::{collections::BTreeMap, fmt::Debug, path::Path};
+use std::{collections::BTreeMap, fmt::Debug, path::Path, sync::Arc};
 use tempfile::TempDir;
 
 /// Test database that is used for testing stage implementations.
@@ -38,12 +41,15 @@ impl Default for TestStageDB {
     /// Create a new instance of [`TestStageDB`]
     fn default() -> Self {
         let (static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
+
         Self {
             temp_static_files_dir: static_dir,
             factory: ProviderFactory::new(
                 create_test_rw_db(),
                 MAINNET.clone(),
                 StaticFileProvider::read_write(static_dir_path).unwrap(),
+                TrieDbProvider::open(triedb_dir_path).unwrap(),
             ),
         }
     }
@@ -52,6 +58,7 @@ impl Default for TestStageDB {
 impl TestStageDB {
     pub fn new(path: &Path) -> Self {
         let (static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
 
         Self {
             temp_static_files_dir: static_dir,
@@ -59,6 +66,7 @@ impl TestStageDB {
                 create_test_rw_db_with_path(path),
                 MAINNET.clone(),
                 StaticFileProvider::read_write(static_dir_path).unwrap(),
+                TrieDbProvider::open(triedb_dir_path).unwrap(),
             ),
         }
     }

@@ -14,7 +14,7 @@ use itertools::Itertools;
 use reth_execution_errors::StorageRootError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx,
-    ProviderError, StateCommitmentProvider,
+    ProviderError, StateCommitmentProvider, TrieDbTxProvider,
 };
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
@@ -88,8 +88,10 @@ impl<Factory: DatabaseProviderFactory> ParallelProof<Factory> {
 
 impl<Factory> ParallelProof<Factory>
 where
-    Factory:
-        DatabaseProviderFactory<Provider: BlockReader> + StateCommitmentProvider + Clone + 'static,
+    Factory: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
+        + StateCommitmentProvider
+        + Clone
+        + 'static,
 {
     /// Spawns a storage proof on the storage proof task and returns a receiver for the result.
     fn spawn_storage_proof(
@@ -331,8 +333,11 @@ mod tests {
     };
     use rand::Rng;
     use reth_primitives_traits::{Account, StorageEntry};
-    use reth_provider::{test_utils::create_test_provider_factory, HashingWriter};
+    use reth_provider::{
+        providers::ConsistentDbView, test_utils::create_test_provider_factory, HashingWriter,
+    };
     use reth_trie::proof::Proof;
+    use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
     use tokio::runtime::Runtime;
 
     #[test]
@@ -394,10 +399,6 @@ mod tests {
             }
         }
 
-        let provider_rw = factory.provider_rw().unwrap();
-        let trie_cursor_factory = DatabaseTrieCursorFactory::new(provider_rw.tx_ref());
-        let hashed_cursor_factory = DatabaseHashedCursorFactory::new(provider_rw.tx_ref());
-
         let rt = Runtime::new().unwrap();
 
         let task_ctx =
@@ -409,7 +410,12 @@ mod tests {
         // keep the join handle around to make sure it does not return any errors
         // after we compute the state root
         let join_handle = rt.spawn_blocking(move || proof_task.run());
-
+        let provider_rw = factory.provider_rw().unwrap();
+        let trie_cursor_factory = DatabaseTrieCursorFactory::new(provider_rw.tx_ref());
+        let hashed_cursor_factory = DatabaseHashedCursorFactory::new(provider_rw.tx_ref());
+        let sequential_result = Proof::new(trie_cursor_factory, hashed_cursor_factory)
+            .multiproof(targets.clone())
+            .unwrap();
         let parallel_result = ParallelProof::new(
             consistent_view,
             Default::default(),
@@ -419,9 +425,6 @@ mod tests {
         )
         .multiproof(targets.clone())
         .unwrap();
-
-        let sequential_result =
-            Proof::new(trie_cursor_factory, hashed_cursor_factory).multiproof(targets).unwrap();
 
         // to help narrow down what is wrong - first compare account subtries
         assert_eq!(parallel_result.account_subtree, sequential_result.account_subtree);

@@ -264,7 +264,8 @@ where
         + StatsReader
         + BlockHashReader
         + StateWriter<Receipt = <E::Primitives as NodePrimitives>::Receipt>
-        + StateCommitmentProvider,
+        + StateCommitmentProvider
+        + reth_provider::TrieDbTxProvider,
 {
     /// Return the id of the stage
     fn id(&self) -> StageId {

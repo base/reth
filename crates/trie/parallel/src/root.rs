@@ -7,16 +7,17 @@ use itertools::Itertools;
 use reth_execution_errors::StorageRootError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, ProviderError,
-    StateCommitmentProvider,
+    StateCommitmentProvider, TrieDbTxProvider,
 };
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     hashed_cursor::{HashedCursorFactory, HashedPostStateCursorFactory},
     node_iter::{TrieElement, TrieNodeIter},
     trie_cursor::{InMemoryTrieCursorFactory, TrieCursorFactory},
-    updates::TrieUpdates,
+    updates::{TrieUpdates, TrieUpdatesSorted},
     walker::TrieWalker,
-    HashBuilder, Nibbles, StorageRoot, TrieInput, TrieType, TRIE_ACCOUNT_RLP_MAX_SIZE,
+    HashBuilder, HashedPostStateSorted, Nibbles, StorageRoot, TrieInput, TrieType,
+    TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
 use std::{collections::HashMap, sync::Arc};
@@ -59,7 +60,7 @@ impl<Factory> ParallelStateRoot<Factory> {
 
 impl<Factory> ParallelStateRoot<Factory>
 where
-    Factory: DatabaseProviderFactory<Provider: BlockReader>
+    Factory: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
         + StateCommitmentProvider
         + Clone
         + Send
@@ -88,7 +89,7 @@ where
         let prefix_sets = self.input.prefix_sets.freeze();
         let storage_root_targets = StorageRootTargets::new(
             prefix_sets.account_prefix_set.iter().map(|nibbles| B256::from_slice(&nibbles.pack())),
-            prefix_sets.storage_prefix_sets,
+            prefix_sets.storage_prefix_sets.clone(),
         );
 
         // Pre-calculate storage roots in parallel for accounts which were changed.
@@ -133,9 +134,46 @@ where
         }
 
         trace!(target: "trie::parallel_state_root", "calculating state root");
-        let mut trie_updates = TrieUpdates::default();
 
-        let provider_ro = self.view.provider_ro()?;
+        let view = self.view.clone();
+        #[cfg(feature = "metrics")]
+        let metrics = self.metrics.clone();
+        let (root, updates) = Self::calculate_with_database_backend_static(
+            view,
+            #[cfg(feature = "metrics")]
+            metrics,
+            trie_nodes_sorted,
+            hashed_state_sorted,
+            prefix_sets,
+            retain_updates,
+            storage_roots,
+            tracker,
+        )?;
+
+        Ok((root, updates))
+    }
+
+    /// Calculate state root using Database backend
+    fn calculate_with_database_backend_static(
+        view: ConsistentDbView<Factory>,
+        #[cfg(feature = "metrics")] metrics: ParallelStateRootMetrics,
+        trie_nodes_sorted: Arc<TrieUpdatesSorted>,
+        hashed_state_sorted: Arc<HashedPostStateSorted>,
+        prefix_sets: reth_trie::prefix_set::TriePrefixSets,
+        retain_updates: bool,
+        mut storage_roots: HashMap<
+            B256,
+            std::sync::mpsc::Receiver<
+                Result<
+                    (B256, usize, reth_trie::updates::StorageTrieUpdates),
+                    ParallelStateRootError,
+                >,
+            >,
+        >,
+        mut tracker: ParallelTrieTracker,
+    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+        let mut trie_updates = TrieUpdates::default();
+        let provider_ro = view.provider_ro()?;
         let trie_cursor_factory = InMemoryTrieCursorFactory::new(
             DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
             &trie_nodes_sorted,
@@ -164,7 +202,9 @@ where
                     hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);
                 }
                 TrieElement::Leaf(hashed_address, account) => {
-                    let (storage_root, _, updates) = match storage_roots.remove(&hashed_address) {
+                    let (storage_root, _, storage_updates) = match storage_roots
+                        .remove(&hashed_address)
+                    {
                         Some(rx) => rx.recv().map_err(|_| {
                             ParallelStateRootError::StorageRoot(StorageRootError::Database(
                                 DatabaseError::Other(format!(
@@ -176,20 +216,29 @@ where
                         // be a possibility of re-adding a non-modified leaf to the hash builder.
                         None => {
                             tracker.inc_missed_leaves();
+                            let provider_ro = view.provider_ro()?;
+                            let trie_cursor_factory = InMemoryTrieCursorFactory::new(
+                                DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
+                                &trie_nodes_sorted,
+                            );
+                            let hashed_cursor_factory = HashedPostStateCursorFactory::new(
+                                DatabaseHashedCursorFactory::new(provider_ro.tx_ref()),
+                                &hashed_state_sorted,
+                            );
                             StorageRoot::new_hashed(
-                                trie_cursor_factory.clone(),
-                                hashed_cursor_factory.clone(),
+                                trie_cursor_factory,
+                                hashed_cursor_factory,
                                 hashed_address,
                                 Default::default(),
                                 #[cfg(feature = "metrics")]
-                                self.metrics.storage_trie.clone(),
+                                metrics.storage_trie.clone(),
                             )
                             .calculate(retain_updates)?
                         }
                     };
 
                     if retain_updates {
-                        trie_updates.insert_storage_updates(hashed_address, updates);
+                        trie_updates.insert_storage_updates(hashed_address, storage_updates);
                     }
 
                     account_rlp.clear();
@@ -208,7 +257,7 @@ where
         let stats = tracker.finish();
 
         #[cfg(feature = "metrics")]
-        self.metrics.record_state_trie(stats);
+        metrics.record_state_trie(stats);
 
         trace!(
             target: "trie::parallel_state_root",
@@ -325,14 +374,17 @@ mod tests {
             let should_update_storage = rng.random_bool(0.3);
             if should_update_storage {
                 for (slot, value) in storage.iter_mut() {
-                    let hashed_slot = keccak256(slot);
-                    *value = U256::from(rng.random::<u64>());
-                    hashed_state
-                        .storages
-                        .entry(hashed_address)
-                        .or_insert_with(HashedStorage::default)
-                        .storage
-                        .insert(hashed_slot, *value);
+                    let should_update_slot = rng.random_bool(0.5);
+                    if should_update_slot {
+                        let hashed_slot = keccak256(slot);
+                        *value = U256::from(rng.random::<u64>());
+                        hashed_state
+                            .storages
+                            .entry(hashed_address)
+                            .or_insert_with(HashedStorage::default)
+                            .storage
+                            .insert(hashed_slot, *value);
+                    }
                 }
             }
         }

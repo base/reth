@@ -16,7 +16,20 @@
 
 use std::{path::Path, sync::Arc};
 
-use reth::beacon_consensus::EthBeaconConsensus;
+use reth::{
+    api::NodeTypesWithDBAdapter,
+    beacon_consensus::EthBeaconConsensus,
+    network::noop::NoopNetwork,
+    providers::{
+        providers::{BlockchainProvider, StaticFileProvider, TrieDbProvider},
+        ProviderFactory,
+    },
+    rpc::{
+        builder::{RethRpcModule, RpcModuleBuilder, RpcServerConfig, TransportRpcModuleConfig},
+        EthApiBuilder,
+    },
+    tasks::TokioTaskExecutor,
+};
 use reth_ethereum::{
     chainspec::ChainSpecBuilder,
     network::api::noop::NoopNetwork,
@@ -53,6 +66,7 @@ async fn main() -> eyre::Result<()> {
         db.clone(),
         spec.clone(),
         StaticFileProvider::read_only(db_path.join("static_files"), true)?,
+        TrieDbProvider::open(db_path.join("triedb"))?,
     );
 
     // 2. Setup the blockchain provider using only the database provider and a noop for the tree to

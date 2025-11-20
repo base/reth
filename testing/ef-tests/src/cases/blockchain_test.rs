@@ -4,6 +4,7 @@ use crate::{
     models::{BlockchainTest, ForkSpec},
     Case, Error, Suite,
 };
+use alloy_primitives::{keccak256, B256};
 use alloy_rlp::Decodable;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_chainspec::ChainSpec;
@@ -12,10 +13,18 @@ use reth_ethereum_primitives::Block;
 use reth_primitives_traits::SealedBlock;
 use reth_provider::{
     providers::StaticFileWriter, test_utils::create_test_provider_factory_with_chain_spec,
-    DatabaseProviderFactory, HashingWriter, StaticFileProviderFactory, StaticFileSegment,
+    DatabaseProviderFactory, HashingWriter, StaticFileProviderFactory, TrieDbProviderFactory,
+    TrieDbTxProvider,
 };
 use reth_stages::{stages::ExecutionStage, ExecInput, Stage};
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+use triedb::account::Account as TrieDBAccount;
 
 /// A handler for the blockchain test suite.
 #[derive(Debug)]
@@ -65,13 +74,13 @@ impl Case for BlockchainTestCase {
     fn run(&self) -> Result<(), Error> {
         // If the test is marked for skipping, return a Skipped error immediately.
         if self.skip {
-            return Err(Error::Skipped)
+            return Err(Error::Skipped);
         }
 
         // Iterate through test cases, filtering by the network type to exclude specific forks.
         self.tests
-            .values()
-            .filter(|case| {
+            .iter()
+            .filter(|(_, case)| {
                 !matches!(
                     case.network,
                     ForkSpec::ByzantiumToConstantinopleAt5 |
@@ -130,7 +139,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         .try_recover()
         .unwrap(),
     )?;
-    case.pre.write_to_db(provider.tx_ref())?;
+    case.pre.write_to_db_triedb(provider.tx_ref(), provider.triedb_tx())?;
 
     // Initialize receipts static file with genesis
     {
@@ -189,9 +198,48 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         _ => return Err(Error::MissingPostState),
     }
 
-    // Drop the provider without committing to the database.
-    drop(provider);
+    // Validate the post-state for triedb
+    provider.commit()?;
 
+    let triedb_ro_tx = provider_factory.triedb_provider().tx()?;
+
+    match (&case.post_state, &case.post_state_hash) {
+        (Some(state), None) => {
+            // Validate accounts in the state against the triedb's database.
+            for (&address, account) in state {
+                match triedb_ro_tx.assert_db(
+                    address,
+                    TrieDBAccount::new(
+                        account.nonce.to(),
+                        account.balance,
+                        B256::ZERO,
+                        keccak256(account.code.clone()),
+                    ),
+                    account.storage.clone(),
+                ) {
+                    Err(_) => println!("failed test: {:?}", name),
+                    _ => (),
+                };
+                triedb_ro_tx.assert_db(
+                    address,
+                    TrieDBAccount::new(
+                        account.nonce.to(),
+                        account.balance,
+                        B256::ZERO,
+                        keccak256(account.code.clone()),
+                    ),
+                    account.storage.clone(),
+                )?;
+            }
+        }
+        (None, Some(expected_state_root)) => {
+            triedb_ro_tx.assert_state_root(*expected_state_root)?;
+        }
+        _ => return Err(Error::MissingPostState),
+    }
+
+    // Drop the provider without committing to the database.
+    // drop(provider);
     Ok(())
 }
 

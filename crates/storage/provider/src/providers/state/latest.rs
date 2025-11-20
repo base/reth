@@ -1,6 +1,7 @@
 use crate::{
-    providers::state::macros::delegate_provider_impls, AccountReader, BlockHashReader,
-    HashedPostStateProvider, StateProvider, StateRootProvider,
+    providers::{state::macros::delegate_provider_impls, triedb::triedb_account_to_reth},
+    AccountReader, BlockHashReader, HashedPostStateProvider, StateProvider, StateRootProvider,
+    TrieDbTxProvider,
 };
 use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
@@ -20,6 +21,7 @@ use reth_trie_db::{
     DatabaseProof, DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot,
     DatabaseTrieWitness, StateCommitment,
 };
+use triedb::path::{AddressPath, StoragePath};
 
 /// State provider over latest state that takes tx reference.
 ///
@@ -38,10 +40,19 @@ impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
     }
 }
 
-impl<Provider: DBProvider> AccountReader for LatestStateProviderRef<'_, Provider> {
+impl<Provider: DBProvider + TrieDbTxProvider> AccountReader
+    for LatestStateProviderRef<'_, Provider>
+{
     /// Get basic account information.
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        self.tx().get_by_encoded_key::<tables::PlainAccountState>(address).map_err(Into::into)
+        tracing::warn!(
+            "LatestStateProviderRef::basic_account: Reading account from TrieDB at {}",
+            address
+        );
+        self.0
+            .triedb_tx_ref()
+            .get_account(AddressPath::for_address(*address))
+            .map(|account| account.map(|account| triedb_account_to_reth(&account)))
     }
 }
 
@@ -160,8 +171,8 @@ impl<Provider: DBProvider + StateCommitmentProvider> HashedPostStateProvider
     }
 }
 
-impl<Provider: DBProvider + BlockHashReader + StateCommitmentProvider> StateProvider
-    for LatestStateProviderRef<'_, Provider>
+impl<Provider: DBProvider + BlockHashReader + StateCommitmentProvider + TrieDbTxProvider>
+    StateProvider for LatestStateProviderRef<'_, Provider>
 {
     /// Get storage.
     fn storage(
@@ -169,13 +180,13 @@ impl<Provider: DBProvider + BlockHashReader + StateCommitmentProvider> StateProv
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-        let mut cursor = self.tx().cursor_dup_read::<tables::PlainStorageState>()?;
-        if let Some(entry) = cursor.seek_by_key_subkey(account, storage_key)? {
-            if entry.key == storage_key {
-                return Ok(Some(entry.value))
-            }
-        }
-        Ok(None)
+        tracing::warn!(
+            "LatestStateProviderRef::storage: Reading storage from TrieDB at {}",
+            account
+        );
+        self.0
+            .triedb_tx_ref()
+            .get_storage_slot(StoragePath::for_address_and_slot(account, storage_key))
     }
 
     /// Get account code by its hash
@@ -212,7 +223,7 @@ impl<Provider: StateCommitmentProvider> StateCommitmentProvider for LatestStateP
 }
 
 // Delegates all provider impls to [LatestStateProviderRef]
-delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader + StateCommitmentProvider]);
+delegate_provider_impls!(LatestStateProvider<Provider> where [Provider: DBProvider + BlockHashReader + StateCommitmentProvider + TrieDbTxProvider]);
 
 #[cfg(test)]
 mod tests {
@@ -221,7 +232,7 @@ mod tests {
     const fn assert_state_provider<T: StateProvider>() {}
     #[expect(dead_code)]
     const fn assert_latest_state_provider<
-        T: DBProvider + BlockHashReader + StateCommitmentProvider,
+        T: DBProvider + BlockHashReader + StateCommitmentProvider + TrieDbTxProvider,
     >() {
         assert_state_provider::<LatestStateProvider<T>>();
     }

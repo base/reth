@@ -274,6 +274,7 @@ impl TreeConfig {
 
     /// Whether or not to use state root task
     pub const fn use_state_root_task(&self) -> bool {
-        self.has_enough_parallelism && !self.legacy_state_root
+        // self.has_enough_parallelism && !self.legacy_state_root
+        false
     }
 }

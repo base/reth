@@ -26,3 +26,6 @@ pub mod writer;
 
 /// Any error
 pub mod any;
+
+/// TrieDB error
+pub mod triedb;

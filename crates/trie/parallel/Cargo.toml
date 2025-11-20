@@ -21,6 +21,10 @@ reth-trie-common.workspace = true
 reth-trie-db.workspace = true
 reth-trie-sparse.workspace = true
 reth-trie.workspace = true
+reth-triedb.workspace = true
+
+# External TrieDB
+triedb = { git = "https://github.com/base/triedb" }
 
 # alloy
 alloy-rlp.workspace = true
@@ -53,6 +57,7 @@ criterion.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tempfile.workspace = true
 
 [features]
 default = ["metrics"]

@@ -13,7 +13,7 @@ use reth_errors::ProviderError;
 use reth_metrics::Metrics;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DatabaseProviderFactory, FactoryTx,
-    StateCommitmentProvider,
+    StateCommitmentProvider, TrieDbTxProvider,
 };
 use reth_revm::state::EvmState;
 use reth_trie::{
@@ -355,8 +355,10 @@ pub struct MultiproofManager<Factory: DatabaseProviderFactory> {
 
 impl<Factory> MultiproofManager<Factory>
 where
-    Factory:
-        DatabaseProviderFactory<Provider: BlockReader> + StateCommitmentProvider + Clone + 'static,
+    Factory: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
+        + StateCommitmentProvider
+        + Clone
+        + 'static,
 {
     /// Creates a new [`MultiproofManager`].
     fn new(
@@ -635,8 +637,10 @@ pub(super) struct MultiProofTask<Factory: DatabaseProviderFactory> {
 
 impl<Factory> MultiProofTask<Factory>
 where
-    Factory:
-        DatabaseProviderFactory<Provider: BlockReader> + StateCommitmentProvider + Clone + 'static,
+    Factory: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
+        + StateCommitmentProvider
+        + Clone
+        + 'static,
 {
     /// Creates a new multi proof task with the unified message channel
     pub(super) fn new(
@@ -1116,7 +1120,10 @@ fn get_proof_targets(
 mod tests {
     use super::*;
     use alloy_primitives::map::B256Set;
-    use reth_provider::{providers::ConsistentDbView, test_utils::create_test_provider_factory};
+    use reth_provider::{
+        providers::ConsistentDbView, test_utils::create_test_provider_factory,
+        TrieDbProviderFactory,
+    };
     use reth_trie::TrieInput;
     use reth_trie_parallel::proof_task::{ProofTaskCtx, ProofTaskManager};
     use revm_primitives::{B256, U256};
@@ -1124,7 +1131,7 @@ mod tests {
 
     fn create_state_root_config<F>(factory: F, input: TrieInput) -> MultiProofConfig<F>
     where
-        F: DatabaseProviderFactory<Provider: BlockReader>
+        F: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
             + StateCommitmentProvider
             + Clone
             + 'static,
@@ -1139,8 +1146,9 @@ mod tests {
 
     fn create_test_state_root_task<F>(factory: F) -> MultiProofTask<F>
     where
-        F: DatabaseProviderFactory<Provider: BlockReader>
+        F: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
             + StateCommitmentProvider
+            + TrieDbProviderFactory
             + Clone
             + 'static,
     {

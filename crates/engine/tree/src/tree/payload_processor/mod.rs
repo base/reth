@@ -20,7 +20,7 @@ use reth_evm::{ConfigureEvm, OnStateHook};
 use reth_primitives_traits::{NodePrimitives, SealedHeaderFor};
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DatabaseProviderFactory, StateCommitmentProvider,
-    StateProviderFactory, StateReader,
+    StateProviderFactory, StateReader, TrieDbTxProvider,
 };
 use reth_revm::{db::BundleState, state::EvmState};
 use reth_trie::TrieInput;
@@ -122,7 +122,7 @@ where
         config: &TreeConfig,
     ) -> PayloadHandle
     where
-        P: DatabaseProviderFactory<Provider: BlockReader>
+        P: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
             + BlockReader
             + StateProviderFactory
             + StateReader
@@ -437,7 +437,7 @@ mod tests {
     use reth_provider::{
         providers::{BlockchainProvider, ConsistentDbView},
         test_utils::create_test_provider_factory_with_chain_spec,
-        ChainSpecProvider, HashingWriter,
+        ChainSpecProvider, HashingWriter, TrieDbTxProvider,
     };
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState, TrieInput};
@@ -542,6 +542,8 @@ mod tests {
             }
         }
 
+        let root_from_triedb = factory.provider().unwrap().triedb_tx().state_root();
+
         let payload_processor = PayloadProcessor::<EthPrimitives, _>::new(
             WorkloadExecutor::default(),
             EthEvmConfig::new(factory.chain_spec()),
@@ -570,6 +572,10 @@ mod tests {
         assert_eq!(
             root_from_task, root_from_regular,
             "State root mismatch: task={root_from_task}, base={root_from_regular}"
+        );
+        assert_eq!(
+            root_from_task, root_from_triedb,
+            "State root mismatch: task={root_from_task}, triedb={root_from_triedb}"
         );
     }
 }

@@ -301,6 +301,13 @@ impl<D> ChainPath<D> {
         }
     }
 
+    /// Returns the path to the TrieDB directory for this chain.
+    ///
+    /// `<DIR>/<CHAIN_ID>/triedb`
+    pub fn triedb(&self) -> PathBuf {
+        self.data_dir().join("triedb")
+    }
+
     /// Returns the path to the reth p2p secret key for this chain.
     ///
     /// `<DIR>/<CHAIN_ID>/discovery-secret`

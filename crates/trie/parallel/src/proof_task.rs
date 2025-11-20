@@ -13,8 +13,9 @@ use alloy_primitives::{map::B256Set, B256};
 use reth_db_api::transaction::DbTx;
 use reth_execution_errors::SparseTrieError;
 use reth_provider::{
-    providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx,
-    ProviderResult, StateCommitmentProvider,
+    providers::{triedb::TrieDbTransaction, ConsistentDbView},
+    BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx, ProviderResult,
+    StateCommitmentProvider, TrieDbTxProvider,
 };
 use reth_trie::{
     hashed_cursor::HashedPostStateCursorFactory,
@@ -106,7 +107,9 @@ impl<Factory: DatabaseProviderFactory> ProofTaskManager<Factory> {
 
 impl<Factory> ProofTaskManager<Factory>
 where
-    Factory: DatabaseProviderFactory<Provider: BlockReader> + StateCommitmentProvider + 'static,
+    Factory: DatabaseProviderFactory<Provider: BlockReader + TrieDbTxProvider>
+        + StateCommitmentProvider
+        + 'static,
 {
     /// Inserts the task into the pending tasks queue.
     pub fn queue_proof_task(&mut self, task: ProofTaskKind) {
@@ -187,20 +190,31 @@ where
     }
 }
 
+/// Transaction type for proof tasks that supports both Database and TrieDB backends
+#[derive(Debug)]
+pub enum ProofTaskTransaction<Tx> {
+    /// Database transaction
+    Database(Tx),
+    /// TrieDB transaction
+    TrieDb(TrieDbTransaction),
+    /// Both Database and TrieDB transactions
+    Both(Tx, TrieDbTransaction),
+}
+
 /// This contains all information shared between all storage proof instances.
 #[derive(Debug)]
 pub struct ProofTaskTx<Tx> {
     /// The tx that is reused for proof calculations.
-    tx: Tx,
+    tx: ProofTaskTransaction<Tx>,
 
     /// Trie updates, prefix sets, and state updates
     task_ctx: ProofTaskCtx,
 }
 
 impl<Tx> ProofTaskTx<Tx> {
-    /// Initializes a [`ProofTaskTx`] using the given transaction anda[`ProofTaskCtx`].
+    /// Initializes a [`ProofTaskTx`] using the given database transaction and [`ProofTaskCtx`].
     const fn new(tx: Tx, task_ctx: ProofTaskCtx) -> Self {
-        Self { tx, task_ctx }
+        Self { tx: ProofTaskTransaction::Database(tx), task_ctx }
     }
 }
 
@@ -214,13 +228,17 @@ where
         InMemoryTrieCursorFactory<'_, DatabaseTrieCursorFactory<'_, Tx>>,
         HashedPostStateCursorFactory<'_, DatabaseHashedCursorFactory<'_, Tx>>,
     ) {
+        let ProofTaskTransaction::Database(tx) = &self.tx else {
+            panic!("Tried to create database factories with a TrieDB transaction");
+        };
+
         let trie_cursor_factory = InMemoryTrieCursorFactory::new(
-            DatabaseTrieCursorFactory::new(&self.tx),
+            DatabaseTrieCursorFactory::new(tx),
             &self.task_ctx.nodes_sorted,
         );
 
         let hashed_cursor_factory = HashedPostStateCursorFactory::new(
-            DatabaseHashedCursorFactory::new(&self.tx),
+            DatabaseHashedCursorFactory::new(tx),
             &self.task_ctx.state_sorted,
         );
 

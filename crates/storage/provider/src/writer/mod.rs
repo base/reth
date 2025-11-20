@@ -1,7 +1,7 @@
 use crate::{
     providers::{StaticFileProvider, StaticFileWriter as SfWriter},
     BlockExecutionWriter, BlockWriter, HistoryWriter, StateWriter, StaticFileProviderFactory,
-    StorageLocation, TrieWriter,
+    StorageLocation, TrieDbTxProvider, TrieWriter,
 };
 use alloy_consensus::BlockHeader;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
@@ -109,7 +109,7 @@ impl UnifiedStorageWriter<'_, (), ()> {
     /// NOTE: Should only be used after unwinding data from storage!
     pub fn commit_unwind<P>(provider: P) -> ProviderResult<()>
     where
-        P: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory,
+        P: DBProvider<Tx: DbTxMut> + StaticFileProviderFactory + TrieDbTxProvider,
     {
         let static_file = provider.static_file_provider();
         provider.commit()?;

@@ -10,7 +10,9 @@ use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
 };
+use reth_primitives::{Account as RethAccount, Bytecode, SealedHeader, StorageEntry};
 use reth_primitives_traits::{Account as RethAccount, Bytecode, SealedHeader, StorageEntry};
+use reth_provider::providers::TrieDbTransaction;
 use serde::Deserialize;
 use std::{collections::BTreeMap, ops::Deref};
 
@@ -178,7 +180,7 @@ impl State {
 
             for (k, v) in &account.storage {
                 if v.is_zero() {
-                    continue
+                    continue;
                 }
                 let storage_key = B256::from_slice(&k.to_be_bytes::<32>());
                 tx.put::<tables::PlainStorageState>(
@@ -189,6 +191,48 @@ impl State {
                     hashed_address,
                     StorageEntry { key: keccak256(storage_key), value: *v },
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write the state to the database and triedb.
+    pub fn write_to_db_triedb(
+        &self,
+        tx: &impl DbTxMut,
+        triedb_tx: &mut TrieDbTransaction,
+    ) -> Result<(), Error> {
+        for (&address, account) in &self.0 {
+            let hashed_address = keccak256(address);
+            let has_code = !account.code.is_empty();
+            let code_hash = has_code.then(|| keccak256(&account.code));
+            let reth_account = RethAccount {
+                balance: account.balance,
+                nonce: account.nonce.to::<u64>(),
+                bytecode_hash: code_hash,
+            };
+            tx.put::<tables::PlainAccountState>(address, reth_account)?;
+            tx.put::<tables::HashedAccounts>(hashed_address, reth_account)?;
+            triedb_tx.set_account(hashed_address, Some(reth_account))?;
+
+            if let Some(code_hash) = code_hash {
+                tx.put::<tables::Bytecodes>(code_hash, Bytecode::new_raw(account.code.clone()))?;
+            }
+
+            for (k, v) in &account.storage {
+                if v.is_zero() {
+                    continue;
+                }
+                let storage_key = B256::from_slice(&k.to_be_bytes::<32>());
+                tx.put::<tables::PlainStorageState>(
+                    address,
+                    StorageEntry { key: storage_key, value: *v },
+                )?;
+                tx.put::<tables::HashedStorages>(
+                    hashed_address,
+                    StorageEntry { key: keccak256(storage_key), value: *v },
+                )?;
+                triedb_tx.set_storage_slot(hashed_address, keccak256(storage_key), Some(*v))?;
             }
         }
         Ok(())
@@ -256,12 +300,12 @@ impl Account {
                 } else {
                     return Err(Error::Assertion(format!(
                         "Slot {slot:?} is missing from the database. Expected {value:?}"
-                    )))
+                    )));
                 }
             } else {
                 return Err(Error::Assertion(format!(
                     "Slot {slot:?} is missing from the database. Expected {value:?}"
-                )))
+                )));
             }
         }
 

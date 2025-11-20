@@ -22,6 +22,9 @@ reth-prune-types = { workspace = true, features = ["serde", "reth-codec"] }
 reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
 
+# triedb
+triedb = { git = "https://github.com/base/triedb" }
+
 # ethereum
 alloy-primitives.workspace = true
 alloy-genesis.workspace = true

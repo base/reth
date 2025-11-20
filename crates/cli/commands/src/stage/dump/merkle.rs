@@ -12,7 +12,7 @@ use reth_evm::noop::NoopBlockExecutorProvider;
 use reth_exex::ExExManagerHandle;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_provider::{
-    providers::{ProviderNodeTypes, StaticFileProvider},
+    providers::{ProviderNodeTypes, StaticFileProvider, TrieDbProvider},
     DatabaseProviderFactory, ProviderFactory,
 };
 use reth_stages::{
@@ -60,6 +60,7 @@ where
                 Arc::new(output_db),
                 db_tool.chain(),
                 StaticFileProvider::read_write(output_datadir.static_files())?,
+                TrieDbProvider::open(output_datadir.triedb())?,
             ),
             to,
             from,

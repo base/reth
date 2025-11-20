@@ -1,0 +1,38 @@
+[package]
+name = "reth-triedb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "TrieDB integration for Reth"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Core dependencies
+reth-storage-errors = { workspace = true }
+reth-db-api = { workspace = true }
+reth-trie = { workspace = true }
+reth-trie-common = { workspace = true }
+reth-trie-db = { workspace = true }
+reth-primitives-traits = { workspace = true }
+reth-provider = { workspace = true }
+reth-storage-api = { workspace = true }
+
+# External TrieDB
+triedb = { git = "https://github.com/base/triedb" }
+
+# Alloy primitives
+alloy-primitives = { workspace = true }
+alloy-trie = { workspace = true }
+
+# Async and utilities
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+reth-provider = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }

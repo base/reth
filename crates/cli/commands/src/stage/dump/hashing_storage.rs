@@ -5,7 +5,7 @@ use reth_db_api::{database::Database, table::TableImporter, tables};
 use reth_db_common::DbTool;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_provider::{
-    providers::{ProviderNodeTypes, StaticFileProvider},
+    providers::{ProviderNodeTypes, StaticFileProvider, TrieDbProvider},
     DatabaseProviderFactory, ProviderFactory,
 };
 use reth_stages::{stages::StorageHashingStage, Stage, StageCheckpoint, UnwindInput};
@@ -29,6 +29,7 @@ pub(crate) async fn dump_hashing_storage_stage<N: ProviderNodeTypes<DB = Arc<Dat
                 Arc::new(output_db),
                 db_tool.chain(),
                 StaticFileProvider::read_write(output_datadir.static_files())?,
+                TrieDbProvider::open(output_datadir.triedb())?,
             ),
             to,
             from,

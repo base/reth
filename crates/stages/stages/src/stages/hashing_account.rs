@@ -204,6 +204,7 @@ where
                 let (key, value) = item?;
                 hashed_account_cursor
                     .append(RawKey::<B256>::from_vec(key), &RawValue::<Account>::from_vec(value))?;
+                // TODO: insert into TrieDB as well
             }
         } else {
             // Aggregate all transition changesets and make a list of accounts that have been

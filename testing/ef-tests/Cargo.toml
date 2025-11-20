@@ -33,6 +33,9 @@ reth-revm = { workspace = true, features = ["std"] }
 
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg"] }
 
+# triedb
+triedb = { git = "https://github.com/base/triedb" }
+
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true

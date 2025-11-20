@@ -1,5 +1,6 @@
 use crate::{
-    any::AnyError, db::DatabaseError, lockfile::StorageLockError, writer::UnifiedStorageWriterError,
+    any::AnyError, db::DatabaseError, lockfile::StorageLockError, triedb::TrieDBError,
+    writer::UnifiedStorageWriterError,
 };
 use alloc::{boxed::Box, string::String};
 use alloy_eips::{BlockHashOrNumber, HashOrNumber};
@@ -140,6 +141,9 @@ pub enum ProviderError {
     /// Received invalid output from configured storage implementation.
     #[error("received invalid output from storage")]
     InvalidStorageOutput,
+    /// Error opening a read-only or read-write transaction from TrieDB
+    #[error(transparent)]
+    TrieDB(#[from] TrieDBError),
     /// Any other error type wrapped into a cloneable [`AnyError`].
     #[error(transparent)]
     Other(#[from] AnyError),

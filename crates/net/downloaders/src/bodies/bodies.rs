@@ -620,9 +620,13 @@ mod tests {
     use assert_matches::assert_matches;
     use reth_chainspec::MAINNET;
     use reth_consensus::test_utils::TestConsensus;
-    use reth_db::test_utils::{create_test_rw_db, create_test_static_files_dir};
+    use reth_db::test_utils::{
+        create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir,
+    };
     use reth_provider::{
-        providers::StaticFileProvider, test_utils::MockNodeTypesWithDB, ProviderFactory,
+        providers::{StaticFileProvider, TrieDbProvider},
+        test_utils::MockNodeTypesWithDB,
+        ProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
     use std::collections::HashMap;
@@ -641,6 +645,7 @@ mod tests {
             TestBodiesClient::default().with_bodies(bodies.clone()).with_should_delay(true),
         );
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .build::<reth_ethereum_primitives::Block, _, _>(
@@ -650,6 +655,7 @@ mod tests {
                     db,
                     MAINNET.clone(),
                     StaticFileProvider::read_write(static_dir_path).unwrap(),
+                    TrieDbProvider::open(triedb_dir_path).unwrap(),
                 ),
             );
         downloader.set_download_range(0..=19).expect("failed to set download range");
@@ -685,6 +691,7 @@ mod tests {
         let request_limit = 10;
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_request_limit(request_limit)
@@ -695,6 +702,7 @@ mod tests {
                 db,
                 MAINNET.clone(),
                 StaticFileProvider::read_write(static_dir_path).unwrap(),
+                TrieDbProvider::open(triedb_dir_path).unwrap(),
             ),
         );
         downloader.set_download_range(0..=199).expect("failed to set download range");
@@ -719,6 +727,7 @@ mod tests {
             TestBodiesClient::default().with_bodies(bodies.clone()).with_should_delay(true),
         );
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_stream_batch_size(stream_batch_size)
             .with_request_limit(request_limit)
@@ -729,6 +738,7 @@ mod tests {
                     db,
                     MAINNET.clone(),
                     StaticFileProvider::read_write(static_dir_path).unwrap(),
+                    TrieDbProvider::open(triedb_dir_path).unwrap(),
                 ),
             );
 
@@ -757,6 +767,7 @@ mod tests {
 
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_stream_batch_size(100)
@@ -767,6 +778,7 @@ mod tests {
                 db,
                 MAINNET.clone(),
                 StaticFileProvider::read_write(static_dir_path).unwrap(),
+                TrieDbProvider::open(triedb_dir_path).unwrap(),
             ),
         );
 
@@ -800,6 +812,7 @@ mod tests {
         let client = Arc::new(TestBodiesClient::default().with_bodies(bodies.clone()));
 
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
         // Set the max buffered block size to 1 byte, to make sure that every response exceeds the
         // limit
         let mut downloader = BodiesDownloaderBuilder::default()
@@ -813,6 +826,7 @@ mod tests {
                     db,
                     MAINNET.clone(),
                     StaticFileProvider::read_write(static_dir_path).unwrap(),
+                    TrieDbProvider::open(triedb_dir_path).unwrap(),
                 ),
             );
 
@@ -839,6 +853,7 @@ mod tests {
             TestBodiesClient::default().with_bodies(bodies.clone()).with_empty_responses(2),
         );
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
 
         let mut downloader = BodiesDownloaderBuilder::default()
             .with_request_limit(3)
@@ -850,6 +865,7 @@ mod tests {
                     db,
                     MAINNET.clone(),
                     StaticFileProvider::read_write(static_dir_path).unwrap(),
+                    TrieDbProvider::open(triedb_dir_path).unwrap(),
                 ),
             );
 

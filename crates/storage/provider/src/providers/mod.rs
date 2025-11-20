@@ -13,6 +13,9 @@ pub use static_file::{
     StaticFileProviderRWRefMut, StaticFileWriter,
 };
 
+pub mod triedb;
+pub use triedb::{TrieDbProvider, TrieDbTransaction};
+
 mod state;
 pub use state::{
     historical::{HistoricalStateProvider, HistoricalStateProviderRef, LowestAvailableBlocks},

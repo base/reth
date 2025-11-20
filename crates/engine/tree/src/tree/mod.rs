@@ -38,9 +38,10 @@ use reth_primitives_traits::{
     Block, GotExpected, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
 };
 use reth_provider::{
-    providers::ConsistentDbView, BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory,
-    ExecutionOutcome, HashedPostStateProvider, ProviderError, StateCommitmentProvider,
-    StateProviderBox, StateProviderFactory, StateReader, StateRootProvider, TransactionVariant,
+    providers::{triedb::TrieDbOverlayStateRoot, ConsistentDbView},
+    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, ExecutionOutcome,
+    HashedPostStateProvider, ProviderError, StateCommitmentProvider, StateProviderBox,
+    StateProviderFactory, StateReader, StateRootProvider, TransactionVariant, TrieDbTxProvider,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
@@ -645,7 +646,7 @@ where
         + Clone
         + 'static,
     <P as DatabaseProviderFactory>::Provider:
-        BlockReader<Block = N::Block, Header = N::BlockHeader>,
+        BlockReader<Block = N::Block, Header = N::BlockHeader> + TrieDbTxProvider,
     E: BlockExecutorProvider<Primitives = N>,
     C: ConfigureEvm<Primitives = N> + 'static,
     T: PayloadTypes,
@@ -2507,7 +2508,7 @@ where
                     }
                 }
             } else {
-                match self.compute_state_root_parallel(
+                match self.compute_triedb_state_root(
                     persisting_kind,
                     block.header().parent_hash(),
                     &hashed_state,
@@ -2517,12 +2518,12 @@ where
                             target: "engine::tree",
                             block = ?block_num_hash,
                             regular_state_root = ?result.0,
-                            "Regular root task finished"
+                            "TrieDB root task finished"
                         );
                         maybe_state_root = Some((result.0, result.1, root_time.elapsed()));
                     }
                     Err(ParallelStateRootError::Provider(ProviderError::ConsistentView(error))) => {
-                        debug!(target: "engine::tree", %error, "Parallel state root computation failed consistency check, falling back");
+                        debug!(target: "engine::tree", %error, "Triedb state root computation failed consistency check, falling back");
                     }
                     Err(error) => return Err(InsertBlockErrorKind::Other(Box::new(error))),
                 }
@@ -2611,6 +2612,24 @@ where
         input.append_ref(hashed_state);
 
         ParallelStateRoot::new(consistent_view, input).incremental_root_with_updates()
+    }
+
+    fn compute_triedb_state_root(
+        &self,
+        persisting_kind: PersistingKind,
+        parent_hash: B256,
+        hashed_state: &HashedPostState,
+    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+        let consistent_view = ConsistentDbView::new_with_latest_tip(self.provider.clone())?;
+
+        let mut input =
+            self.compute_trie_input(persisting_kind, consistent_view.clone(), parent_hash)?;
+        // Extend with block we are validating root for.
+        input.append_ref(hashed_state);
+
+        TrieDbOverlayStateRoot::new(consistent_view.provider_ro()?.into_triedb_tx(), input)
+            .incremental_root_with_updates()
+            .map_err(|e| ParallelStateRootError::Provider(ProviderError::from(e)))
     }
 
     /// Computes the trie input at the provided parent hash.
