@@ -3229,6 +3229,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+ "triedb",
  "walkdir",
 ]
 
@@ -3523,6 +3524,7 @@ dependencies = [
  "reth-ethereum",
  "reth-ethereum-payload-builder",
  "reth-payload-builder",
+ "reth-provider",
  "reth-tracing",
  "serde",
  "thiserror 2.0.17",
@@ -3590,6 +3592,7 @@ dependencies = [
  "reth-optimism-flashblocks",
  "reth-optimism-forks",
  "reth-payload-builder",
+ "reth-provider",
  "reth-rpc-api",
  "reth-rpc-engine-api",
  "revm",
@@ -4165,6 +4168,15 @@ name = "futures-utils-wasm"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
+
+[[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
+]
 
 [[package]]
 name = "generator"
@@ -7769,6 +7781,7 @@ dependencies = [
  "roaring",
  "serde",
  "test-fuzz",
+ "triedb",
 ]
 
 [[package]]
@@ -7916,6 +7929,7 @@ dependencies = [
  "reth-chainspec",
  "reth-config",
  "reth-consensus",
+ "reth-db",
  "reth-ethereum-primitives",
  "reth-metrics",
  "reth-network-p2p",
@@ -9836,6 +9850,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "alloy-trie",
  "assert_matches",
  "dashmap 6.1.0",
  "eyre",
@@ -9866,6 +9881,7 @@ dependencies = [
  "reth-storage-errors",
  "reth-testing-utils",
  "reth-trie",
+ "reth-trie-common",
  "reth-trie-db",
  "revm-database",
  "revm-database-interface",
@@ -9874,6 +9890,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "triedb",
 ]
 
 [[package]]
@@ -10584,6 +10601,7 @@ dependencies = [
  "reth-static-file-types",
  "revm-database-interface",
  "thiserror 2.0.17",
+ "triedb",
 ]
 
 [[package]]
@@ -10819,11 +10837,14 @@ dependencies = [
  "reth-provider",
  "reth-trie",
  "reth-trie-common",
+ "reth-trie-sparse",
  "revm",
  "revm-database",
  "serde_json",
  "similar-asserts",
+ "tempfile",
  "tracing",
+ "triedb",
  "triehash",
 ]
 
@@ -10852,6 +10873,7 @@ dependencies = [
  "reth-trie-common",
  "reth-trie-db",
  "reth-trie-sparse",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -10917,6 +10939,26 @@ dependencies = [
  "reth-trie-sparse",
  "smallvec",
  "tracing",
+]
+
+[[package]]
+name = "reth-triedb"
+version = "1.9.3"
+dependencies = [
+ "alloy-primitives",
+ "alloy-trie",
+ "reth-db-api",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "reth-storage-errors",
+ "reth-trie",
+ "reth-trie-common",
+ "reth-trie-db",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "triedb",
 ]
 
 [[package]]
@@ -11561,6 +11603,17 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sealed"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f968c5ea23d555e670b449c1c5e7b2fc399fdaec1d304a17cd48e288abc107"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
+]
 
 [[package]]
 name = "sec1"
@@ -12988,6 +13041,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.108",
+]
+
+[[package]]
+name = "triedb"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "arrayvec",
+ "fxhash",
+ "memmap2",
+ "metrics",
+ "metrics-derive",
+ "parking_lot",
+ "proptest",
+ "proptest-derive 0.6.0",
+ "rayon",
+ "sealed",
+ "static_assertions",
+ "zerocopy",
 ]
 
 [[package]]

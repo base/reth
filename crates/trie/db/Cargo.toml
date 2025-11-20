@@ -32,6 +32,12 @@ reth-db = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie-common = { workspace = true, features = ["test-utils", "arbitrary"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
+reth-trie-sparse = { workspace = true, features = ["test-utils"] }
+
+# Additional dependencies for backend testing
+tempfile.workspace = true
+#triedb = { git = "https://github.com/base/triedb" }
+triedb = { path = "/home/andrea/src/triedb" }
 
 alloy-consensus.workspace = true
 alloy-rlp.workspace = true

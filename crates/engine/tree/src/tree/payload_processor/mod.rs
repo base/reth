@@ -26,7 +26,9 @@ use reth_evm::{
     ConfigureEvm, EvmEnvFor, OnStateHook, SpecFor, TxEnvFor,
 };
 use reth_primitives_traits::NodePrimitives;
-use reth_provider::{BlockReader, DatabaseProviderROFactory, StateProviderFactory, StateReader};
+use reth_provider::{
+    BlockReader, DatabaseProviderROFactory, StateProviderFactory, StateReader, TrieDbTxProvider,
+};
 use reth_revm::{db::BundleState, state::EvmState};
 use reth_trie::{hashed_cursor::HashedCursorFactory, trie_cursor::TrieCursorFactory};
 use reth_trie_parallel::{
@@ -204,8 +206,9 @@ where
     ) -> PayloadHandle<WithTxEnv<TxEnvFor<Evm>, I::Tx>, I::Error>
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
-        F: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>
-            + Clone
+        F: DatabaseProviderROFactory<
+                Provider: TrieCursorFactory + HashedCursorFactory + TrieDbTxProvider,
+            > + Clone
             + Send
             + 'static,
     {
@@ -700,7 +703,7 @@ mod tests {
     use reth_provider::{
         providers::{BlockchainProvider, OverlayStateProviderFactory},
         test_utils::create_test_provider_factory_with_chain_spec,
-        ChainSpecProvider, HashingWriter,
+        ChainSpecProvider, HashingWriter, TrieDbTxProvider,
     };
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState};
@@ -879,6 +882,8 @@ mod tests {
             }
         }
 
+        let root_from_triedb = factory.provider().unwrap().triedb_tx().state_root();
+
         let mut payload_processor = PayloadProcessor::new(
             WorkloadExecutor::default(),
             EthEvmConfig::new(factory.chain_spec()),
@@ -909,6 +914,10 @@ mod tests {
         assert_eq!(
             root_from_task, root_from_regular,
             "State root mismatch: task={root_from_task}, base={root_from_regular}"
+        );
+        assert_eq!(
+            root_from_task, root_from_triedb,
+            "State root mismatch: task={root_from_task}, triedb={root_from_triedb}"
         );
     }
 }

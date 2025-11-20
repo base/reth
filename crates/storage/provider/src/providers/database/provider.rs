@@ -5,7 +5,8 @@ use crate::{
     providers::{
         database::{chain::ChainStorage, metrics},
         static_file::StaticFileWriter,
-        NodeTypesForProvider, StaticFileProvider,
+        triedb::triedb_account_to_reth,
+        NodeTypesForProvider, StaticFileProvider, TrieDbTransaction,
     },
     to_range,
     traits::{
@@ -18,7 +19,7 @@ use crate::{
     OriginalValuesKnown, ProviderError, PruneCheckpointReader, PruneCheckpointWriter, RevertsInit,
     StageCheckpointReader, StateProviderBox, StateWriter, StaticFileProviderFactory, StatsReader,
     StorageReader, StorageTrieWriter, TransactionVariant, TransactionsProvider,
-    TransactionsProviderExt, TrieReader, TrieWriter,
+    TransactionsProviderExt, TrieDbTxProvider, TrieReader, TrieWriter,
 };
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
@@ -84,6 +85,7 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, trace};
+use triedb::path::{AddressPath, StoragePath};
 
 /// A [`DatabaseProvider`] that holds a read-only database transaction.
 pub type DatabaseProviderRO<DB, N> = DatabaseProvider<<DB as Database>::TX, N>;
@@ -149,6 +151,8 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     chain_spec: Arc<N::ChainSpec>,
     /// Static File provider
     static_file_provider: StaticFileProvider<N::Primitives>,
+    /// TrieDB transaction.
+    triedb_tx: TrieDbTransaction,
     /// Pruning configuration
     prune_modes: PruneModes,
     /// Node storage handler.
@@ -179,7 +183,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         if block_number == self.best_block_number().unwrap_or_default() &&
             block_number == self.last_block_number().unwrap_or_default()
         {
-            return Ok(Box::new(LatestStateProviderRef::new(self)))
+            return Ok(Box::new(LatestStateProviderRef::new(self)));
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -230,6 +234,20 @@ impl<TX, N: NodeTypes> StaticFileProviderFactory for DatabaseProvider<TX, N> {
     }
 }
 
+impl<TX, N: NodeTypes> TrieDbTxProvider for DatabaseProvider<TX, N> {
+    fn triedb_tx_ref(&self) -> &TrieDbTransaction {
+        &self.triedb_tx
+    }
+
+    fn triedb_tx(&mut self) -> &mut TrieDbTransaction {
+        &mut self.triedb_tx
+    }
+
+    fn into_triedb_tx(self) -> TrieDbTransaction {
+        self.triedb_tx
+    }
+}
+
 impl<TX: Debug + Send + Sync, N: NodeTypes<ChainSpec: EthChainSpec + 'static>> ChainSpecProvider
     for DatabaseProvider<TX, N>
 {
@@ -246,10 +264,11 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
         tx: TX,
         chain_spec: Arc<N::ChainSpec>,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        triedb_tx: TrieDbTransaction,
         prune_modes: PruneModes,
         storage: Arc<N::Storage>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage }
+        Self { tx, chain_spec, static_file_provider, triedb_tx, prune_modes, storage }
     }
 }
 
@@ -389,7 +408,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
         // if the block number is the same as the currently best block number on disk we can use the
         // latest state provider here
         if block_number == self.best_block_number().unwrap_or_default() {
-            return Ok(Box::new(LatestStateProvider::new(self)))
+            return Ok(Box::new(LatestStateProvider::new(self)));
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -453,7 +472,7 @@ where
     while let Some((sharded_key, list)) = item {
         // If the shard does not belong to the key, break.
         if !shard_belongs_to_key(&sharded_key) {
-            break
+            break;
         }
 
         // Always delete the current shard from the database first
@@ -492,10 +511,11 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         tx: TX,
         chain_spec: Arc<N::ChainSpec>,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        triedb_tx: TrieDbTransaction,
         prune_modes: PruneModes,
         storage: Arc<N::Storage>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage }
+        Self { tx, chain_spec, static_file_provider, triedb_tx, prune_modes, storage }
     }
 
     /// Consume `DbTx` or `DbTxMut`.
@@ -582,7 +602,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         F: FnMut(H, BodyTy<N>, Range<TxNumber>) -> ProviderResult<R>,
     {
         if range.is_empty() {
-            return Ok(Vec::new())
+            return Ok(Vec::new());
         }
 
         let len = range.end().saturating_sub(*range.start()) as usize;
@@ -771,7 +791,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
             // delete old shard so new one can be inserted.
             cursor.delete_current()?;
             let list = list.iter().collect::<Vec<_>>();
-            return Ok(list)
+            return Ok(list);
         }
         Ok(Vec::new())
     }
@@ -818,7 +838,15 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
 
 impl<TX: DbTx, N: NodeTypes> AccountReader for DatabaseProvider<TX, N> {
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        Ok(self.tx.get_by_encoded_key::<tables::PlainAccountState>(address)?)
+        tracing::trace!(
+            "DatabaseProvider::basic_account: Reading account from TrieDB at {}",
+            address
+        );
+        let address_path = AddressPath::for_address(*address);
+        match self.triedb_tx.get_account(address_path)? {
+            Some(account) => Ok(Some(triedb_account_to_reth(&account))),
+            None => Ok(None),
+        }
     }
 }
 
@@ -840,11 +868,16 @@ impl<TX: DbTx, N: NodeTypes> AccountExtReader for DatabaseProvider<TX, N> {
         &self,
         iter: impl IntoIterator<Item = Address>,
     ) -> ProviderResult<Vec<(Address, Option<Account>)>> {
-        let mut plain_accounts = self.tx.cursor_read::<tables::PlainAccountState>()?;
-        Ok(iter
-            .into_iter()
-            .map(|address| plain_accounts.seek_exact(address).map(|a| (address, a.map(|(_, v)| v))))
-            .collect::<Result<Vec<_>, _>>()?)
+        tracing::debug!("DatabaseProvider::basic_accounts: Reading accounts from TrieDB");
+        iter.into_iter()
+            .map(|address| {
+                let address_path = AddressPath::for_address(address);
+                match self.triedb_tx.get_account(address_path)? {
+                    Some(account) => Ok((address, Some(triedb_account_to_reth(&account)))),
+                    None => Ok((address, None)),
+                }
+            })
+            .collect::<ProviderResult<Vec<_>>>()
     }
 
     fn changed_accounts_and_blocks_with_range(
@@ -943,7 +976,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderSyncGapProvider
             }
             Ordering::Less => {
                 // There's either missing or corrupted files.
-                return Err(ProviderError::HeaderNotFound(next_static_file_block_num.into()))
+                return Err(ProviderError::HeaderNotFound(next_static_file_block_num.into()));
             }
             Ordering::Equal => {}
         }
@@ -1509,18 +1542,21 @@ impl<TX: DbTx + 'static, N: NodeTypes> StorageReader for DatabaseProvider<TX, N>
         &self,
         addresses_with_keys: impl IntoIterator<Item = (Address, impl IntoIterator<Item = B256>)>,
     ) -> ProviderResult<Vec<(Address, Vec<StorageEntry>)>> {
-        let mut plain_storage = self.tx.cursor_dup_read::<tables::PlainStorageState>()?;
-
+        tracing::debug!("DatabaseProvider::plain_state_storages: Reading storage from TrieDB");
         addresses_with_keys
             .into_iter()
             .map(|(address, storage)| {
+                let hashed_address = keccak256(address);
                 storage
                     .into_iter()
                     .map(|key| -> ProviderResult<_> {
-                        Ok(plain_storage
-                            .seek_by_key_subkey(address, key)?
-                            .filter(|v| v.key == key)
-                            .unwrap_or_else(|| StorageEntry { key, value: Default::default() }))
+                        let address_path = AddressPath::new(Nibbles::unpack(hashed_address));
+                        let storage_path =
+                            StoragePath::for_address_path_and_slot(address_path, key);
+                        match self.triedb_tx.get_storage_slot(storage_path)? {
+                            Some(value) => Ok(StorageEntry { key, value }),
+                            None => Ok(StorageEntry { key, value: Default::default() }),
+                        }
                     })
                     .collect::<ProviderResult<Vec<_>>>()
                     .map(|storage| (address, storage))
@@ -1651,7 +1687,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                     .receipts
                     .is_some_and(|mode| mode.should_prune(block_number, tip))
             {
-                continue
+                continue;
             }
 
             // If there are new addresses to retain after this block number, track them
@@ -1667,7 +1703,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                     has_contract_log_filter &&
                     !receipt.logs().iter().any(|log| allowed_addresses.contains(&log.address))
                 {
-                    continue
+                    continue;
                 }
 
                 if let Some(writer) = &mut receipts_static_writer {
@@ -1762,15 +1798,18 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 
         // Write new account state
         tracing::trace!(len = changes.accounts.len(), "Writing new account state");
+        // Database + TrieDB hybrid backend: write to both
         let mut accounts_cursor = self.tx_ref().cursor_write::<tables::PlainAccountState>()?;
-        // write account to database.
         for (address, account) in changes.accounts {
+            let hashed_address = keccak256(address);
             if let Some(account) = account {
                 tracing::trace!(?address, "Updating plain state account");
-                accounts_cursor.upsert(address, &account.into())?;
+                accounts_cursor.upsert(address, &account.clone().into())?;
+                self.triedb_tx.set_account(hashed_address, Some(account.into()))?;
             } else if accounts_cursor.seek_exact(address)?.is_some() {
                 tracing::trace!(?address, "Deleting plain state account");
                 accounts_cursor.delete_current()?;
+                self.triedb_tx.set_account(hashed_address, None)?;
             }
         }
 
@@ -1783,6 +1822,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
 
         // Write new storage state and wipe storage if needed.
         tracing::trace!(len = changes.storage.len(), "Writing new storage state");
+        // Database + TrieDB hybrid backend: write to both
         let mut storages_cursor = self.tx_ref().cursor_dup_write::<tables::PlainStorageState>()?;
         for PlainStorageChangeset { address, wipe_storage, storage } in changes.storage {
             // Wiping of storage.
@@ -1797,6 +1837,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             // sort storage slots by key.
             storage.par_sort_unstable_by_key(|a| a.key);
 
+            let hashed_address = keccak256(address);
+
             for entry in storage {
                 tracing::trace!(?address, ?entry.key, "Updating plain state storage");
                 if let Some(db_entry) = storages_cursor.seek_by_key_subkey(address, entry.key)? &&
@@ -1805,8 +1847,15 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                     storages_cursor.delete_current()?;
                 }
 
-                if !entry.value.is_zero() {
+                if entry.value.is_zero() {
+                    self.triedb_tx.set_storage_slot(hashed_address, keccak256(entry.key), None)?;
+                } else {
                     storages_cursor.upsert(address, &entry)?;
+                    self.triedb_tx.set_storage_slot(
+                        hashed_address,
+                        keccak256(entry.key),
+                        Some(entry.value),
+                    )?;
                 }
             }
         }
@@ -1909,30 +1958,40 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         // iterate over local plain state remove all account and all storages.
         for (address, (old_account, new_account, storage)) in &state {
             // revert account if needed.
+            let hashed_address = keccak256(address);
             if old_account != new_account {
                 let existing_entry = plain_accounts_cursor.seek_exact(*address)?;
                 if let Some(account) = old_account {
                     plain_accounts_cursor.upsert(*address, account)?;
+                    self.triedb_tx.set_account(hashed_address, Some(*account))?;
                 } else if existing_entry.is_some() {
                     plain_accounts_cursor.delete_current()?;
+                    self.triedb_tx.set_account(hashed_address, None)?;
                 }
             }
 
             // revert storages
             for (storage_key, (old_storage_value, _new_storage_value)) in storage {
                 let storage_entry = StorageEntry { key: *storage_key, value: *old_storage_value };
+                let hashed_storage_key = keccak256(*storage_key);
                 // delete previous value
                 if plain_storage_cursor
                     .seek_by_key_subkey(*address, *storage_key)?
                     .filter(|s| s.key == *storage_key)
                     .is_some()
                 {
-                    plain_storage_cursor.delete_current()?
+                    plain_storage_cursor.delete_current()?;
+                    self.triedb_tx.set_storage_slot(hashed_address, hashed_storage_key, None)?;
                 }
 
                 // insert value if needed
                 if !old_storage_value.is_zero() {
                     plain_storage_cursor.upsert(*address, &storage_entry)?;
+                    self.triedb_tx.set_storage_slot(
+                        hashed_address,
+                        hashed_storage_key,
+                        Some(*old_storage_value),
+                    )?;
                 }
             }
         }
@@ -1970,7 +2029,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let range = block + 1..=self.last_block_number()?;
 
         if range.is_empty() {
-            return Ok(ExecutionOutcome::default())
+            return Ok(ExecutionOutcome::default());
         }
         let start_block_number = *range.start();
 
@@ -2007,30 +2066,40 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         // iterate over local plain state remove all account and all storages.
         for (address, (old_account, new_account, storage)) in &state {
             // revert account if needed.
+            let hashed_address = keccak256(address);
             if old_account != new_account {
                 let existing_entry = plain_accounts_cursor.seek_exact(*address)?;
                 if let Some(account) = old_account {
                     plain_accounts_cursor.upsert(*address, account)?;
+                    self.triedb_tx.set_account(hashed_address, Some(*account))?;
                 } else if existing_entry.is_some() {
                     plain_accounts_cursor.delete_current()?;
+                    self.triedb_tx.set_account(hashed_address, None)?;
                 }
             }
 
             // revert storages
             for (storage_key, (old_storage_value, _new_storage_value)) in storage {
                 let storage_entry = StorageEntry { key: *storage_key, value: *old_storage_value };
+                let hashed_storage_key = keccak256(*storage_key);
                 // delete previous value
                 if plain_storage_cursor
                     .seek_by_key_subkey(*address, *storage_key)?
                     .filter(|s| s.key == *storage_key)
                     .is_some()
                 {
-                    plain_storage_cursor.delete_current()?
+                    plain_storage_cursor.delete_current()?;
+                    self.triedb_tx.set_storage_slot(hashed_address, hashed_storage_key, None)?;
                 }
 
                 // insert value if needed
                 if !old_storage_value.is_zero() {
                     plain_storage_cursor.upsert(*address, &storage_entry)?;
+                    self.triedb_tx.set_storage_slot(
+                        hashed_address,
+                        hashed_storage_key,
+                        Some(*old_storage_value),
+                    )?;
                 }
             }
         }
@@ -2089,7 +2158,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> TrieWriter for DatabaseProvider
     /// Returns the number of entries modified.
     fn write_trie_updates_sorted(&self, trie_updates: &TrieUpdatesSorted) -> ProviderResult<usize> {
         if trie_updates.is_empty() {
-            return Ok(0)
+            return Ok(0);
         }
 
         // Track the number of inserted entries.
@@ -2507,8 +2576,10 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         for (hashed_address, account) in &hashed_accounts {
             if let Some(account) = account {
                 hashed_accounts_cursor.upsert(*hashed_address, account)?;
+                self.triedb_tx.set_account(*hashed_address, Some(*account))?;
             } else if hashed_accounts_cursor.seek_exact(*hashed_address)?.is_some() {
                 hashed_accounts_cursor.delete_current()?;
+                self.triedb_tx.set_account(*hashed_address, None)?;
             }
         }
         Ok(hashed_accounts)
@@ -2592,10 +2663,12 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
                     .is_some()
                 {
                     hashed_storage_cursor.delete_current()?;
+                    self.triedb_tx.set_storage_slot(hashed_address, key, None)?;
                 }
 
                 if !value.is_zero() {
                     hashed_storage_cursor.upsert(hashed_address, &StorageEntry { key, value })?;
+                    self.triedb_tx.set_storage_slot(hashed_address, key, Some(value))?;
                 }
                 Ok(())
             })
@@ -2998,7 +3071,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider + 'static> BlockWrite
     ) -> ProviderResult<()> {
         if blocks.is_empty() {
             debug!(target: "providers::db", "Attempted to append empty block range");
-            return Ok(())
+            return Ok(());
         }
 
         // Blocks are not empty, so no need to handle the case of `blocks.first()` being
@@ -3144,11 +3217,13 @@ impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider
         // truncate the static files according to the
         // checkpoints on the next start-up.
         if self.static_file_provider.has_unwind_queued() {
+            self.triedb_tx.commit()?;
             self.tx.commit()?;
             self.static_file_provider.commit()?;
         } else {
             self.static_file_provider.commit()?;
             self.tx.commit()?;
+            self.triedb_tx.commit()?;
         }
 
         Ok(true)

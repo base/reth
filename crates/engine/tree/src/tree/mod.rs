@@ -30,7 +30,7 @@ use reth_payload_primitives::{
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader};
 use reth_provider::{
     BlockReader, DatabaseProviderFactory, HashedPostStateProvider, ProviderError, StateProviderBox,
-    StateProviderFactory, StateReader, TransactionVariant, TrieReader,
+    StateProviderFactory, StateReader, TransactionVariant, TrieDbTxProvider, TrieReader,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
@@ -316,7 +316,7 @@ where
         + Clone
         + 'static,
     <P as DatabaseProviderFactory>::Provider:
-        BlockReader<Block = N::Block, Header = N::BlockHeader>,
+        BlockReader<Block = N::Block, Header = N::BlockHeader> + TrieDbTxProvider,
     C: ConfigureEvm<Primitives = N> + 'static,
     T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
     V: EngineValidator<T>,

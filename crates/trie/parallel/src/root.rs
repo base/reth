@@ -5,7 +5,7 @@ use alloy_primitives::B256;
 use alloy_rlp::{BufMut, Encodable};
 use itertools::Itertools;
 use reth_execution_errors::StorageRootError;
-use reth_provider::{DatabaseProviderROFactory, ProviderError};
+use reth_provider::{DatabaseProviderROFactory, ProviderError, TrieDbTxProvider};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     hashed_cursor::HashedCursorFactory,
@@ -60,8 +60,9 @@ impl<Factory> ParallelStateRoot<Factory> {
 
 impl<Factory> ParallelStateRoot<Factory>
 where
-    Factory: DatabaseProviderROFactory<Provider: TrieCursorFactory + HashedCursorFactory>
-        + Clone
+    Factory: DatabaseProviderROFactory<
+            Provider: TrieCursorFactory + HashedCursorFactory + TrieDbTxProvider,
+        > + Clone
         + Send
         + 'static,
 {

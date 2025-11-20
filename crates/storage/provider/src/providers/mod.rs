@@ -13,6 +13,10 @@ pub use static_file::{
     StaticFileProviderRWRefMut, StaticFileWriter,
 };
 
+#[allow(missing_docs)]
+pub mod triedb;
+pub use triedb::{TrieDbProvider, TrieDbTransaction};
+
 mod state;
 pub use state::{
     historical::{HistoricalStateProvider, HistoricalStateProviderRef, LowestAvailableBlocks},

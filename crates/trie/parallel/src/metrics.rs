@@ -4,7 +4,7 @@ use reth_metrics::Metrics;
 use reth_trie::{metrics::TrieRootMetrics, TrieType};
 
 /// Parallel state root metrics.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParallelStateRootMetrics {
     /// State trie metrics.
     pub state_trie: TrieRootMetrics,
@@ -33,7 +33,7 @@ impl ParallelStateRootMetrics {
 }
 
 /// Parallel state root metrics.
-#[derive(Metrics)]
+#[derive(Clone, Metrics)]
 #[metrics(scope = "trie_parallel")]
 pub struct ParallelTrieMetrics {
     /// The number of storage roots computed in parallel.

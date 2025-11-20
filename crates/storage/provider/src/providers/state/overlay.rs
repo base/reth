@@ -1,3 +1,4 @@
+use crate::{providers::TrieDbTransaction, TrieDbTxProvider};
 use alloy_primitives::{BlockNumber, B256};
 use reth_db_api::DatabaseError;
 use reth_errors::{ProviderError, ProviderResult};
@@ -321,5 +322,22 @@ where
         let hashed_cursor_factory =
             HashedPostStateCursorFactory::new(db_hashed_cursor_factory, &self.hashed_post_state);
         hashed_cursor_factory.hashed_storage_cursor(hashed_address)
+    }
+}
+
+impl<Provider> TrieDbTxProvider for OverlayStateProvider<Provider>
+where
+    Provider: DBProvider + TrieDbTxProvider,
+{
+    fn triedb_tx_ref(&self) -> &TrieDbTransaction {
+        self.provider.triedb_tx_ref()
+    }
+
+    fn triedb_tx(&mut self) -> &mut TrieDbTransaction {
+        self.provider.triedb_tx()
+    }
+
+    fn into_triedb_tx(self) -> TrieDbTransaction {
+        self.provider.into_triedb_tx()
     }
 }

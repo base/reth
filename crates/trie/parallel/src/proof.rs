@@ -259,7 +259,9 @@ mod tests {
     };
     use rand::Rng;
     use reth_primitives_traits::{Account, StorageEntry};
-    use reth_provider::{test_utils::create_test_provider_factory, HashingWriter};
+    use reth_provider::{
+        providers::ConsistentDbView, test_utils::create_test_provider_factory, HashingWriter,
+    };
     use reth_trie::proof::Proof;
     use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
     use tokio::runtime::Runtime;
