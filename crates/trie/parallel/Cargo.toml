@@ -24,7 +24,7 @@ reth-trie.workspace = true
 reth-triedb.workspace = true
 
 # External TrieDB
-triedb = { git = "https://github.com/base/triedb" }
+triedb = { git = "https://github.com/base/triedb", rev = "ee4e382f1a1aa0c773d5707156d85e170bfab488" }
 
 # alloy
 alloy-rlp.workspace = true

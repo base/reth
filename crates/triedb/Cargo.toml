@@ -23,7 +23,7 @@ reth-provider = { workspace = true }
 reth-storage-api = { workspace = true }
 
 # External TrieDB
-triedb = { git = "https://github.com/base/triedb" }
+triedb = { git = "https://github.com/base/triedb", rev = "ee4e382f1a1aa0c773d5707156d85e170bfab488" }
 
 # Alloy primitives
 alloy-primitives = { workspace = true }
