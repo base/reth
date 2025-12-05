@@ -1,11 +1,11 @@
 use crate::{
-    providers::{state::latest::LatestStateProvider, StaticFileProvider},
+    providers::{state::latest::LatestStateProvider, StaticFileProvider, TrieDbProvider},
     to_range,
     traits::{BlockSource, ReceiptProvider},
     BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
     HashedPostStateProvider, HeaderProvider, HeaderSyncGapProvider, ProviderError,
     PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
-    TransactionVariant, TransactionsProvider,
+    TransactionVariant, TransactionsProvider, TrieDbProviderFactory,
 };
 use alloy_consensus::transaction::TransactionMeta;
 use alloy_eips::BlockHashOrNumber;
@@ -60,6 +60,8 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     chain_spec: Arc<N::ChainSpec>,
     /// Static File Provider
     static_file_provider: StaticFileProvider<N::Primitives>,
+    /// TrieDB Provider
+    triedb_provider: TrieDbProvider,
     /// Optional pruning configuration
     prune_modes: PruneModes,
     /// The node storage handler.
@@ -79,11 +81,13 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
         db: N::DB,
         chain_spec: Arc<N::ChainSpec>,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        triedb_provider: TrieDbProvider,
     ) -> Self {
         Self {
             db,
             chain_spec,
             static_file_provider,
+            triedb_provider,
             prune_modes: PruneModes::default(),
             storage: Default::default(),
         }
@@ -121,11 +125,13 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
         chain_spec: Arc<N::ChainSpec>,
         args: DatabaseArguments,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        triedb_provider: TrieDbProvider,
     ) -> RethResult<Self> {
         Ok(Self {
             db: Arc::new(init_db(path, args).map_err(RethError::msg)?),
             chain_spec,
             static_file_provider,
+            triedb_provider,
             prune_modes: PruneModes::default(),
             storage: Default::default(),
         })
@@ -145,6 +151,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.db.tx()?,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
+            self.triedb_provider.tx()?,
             self.prune_modes.clone(),
             self.storage.clone(),
         ))
@@ -160,6 +167,7 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
             self.db.tx_mut()?,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
+            self.triedb_provider.tx_mut()?,
             self.prune_modes.clone(),
             self.storage.clone(),
         )))
@@ -218,6 +226,13 @@ impl<N: NodeTypesWithDB> StaticFileProviderFactory for ProviderFactory<N> {
     /// Returns static file provider
     fn static_file_provider(&self) -> StaticFileProvider<Self::Primitives> {
         self.static_file_provider.clone()
+    }
+}
+
+impl<N: NodeTypesWithDB> TrieDbProviderFactory for ProviderFactory<N> {
+    /// Returns TrieDB provider
+    fn triedb_provider(&self) -> TrieDbProvider {
+        self.triedb_provider.clone()
     }
 }
 
@@ -545,11 +560,13 @@ where
     N: NodeTypesWithDB<DB: fmt::Debug, ChainSpec: fmt::Debug, Storage: fmt::Debug>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { db, chain_spec, static_file_provider, prune_modes, storage } = self;
+        let Self { db, chain_spec, static_file_provider, triedb_provider, prune_modes, storage } =
+            self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
             .field("chain_spec", &chain_spec)
             .field("static_file_provider", &static_file_provider)
+            .field("triedb_provider", &triedb_provider)
             .field("prune_modes", &prune_modes)
             .field("storage", &storage)
             .finish()
@@ -562,6 +579,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             db: self.db.clone(),
             chain_spec: self.chain_spec.clone(),
             static_file_provider: self.static_file_provider.clone(),
+            triedb_provider: self.triedb_provider.clone(),
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
         }
@@ -582,7 +600,7 @@ mod tests {
     use reth_chainspec::ChainSpecBuilder;
     use reth_db::{
         mdbx::DatabaseArguments,
-        test_utils::{create_test_static_files_dir, ERROR_TEMPDIR},
+        test_utils::{create_test_static_files_dir, create_test_triedb_dir, ERROR_TEMPDIR},
     };
     use reth_db_api::tables;
     use reth_primitives_traits::SignerRecoverable;
@@ -621,11 +639,13 @@ mod tests {
     fn provider_factory_with_database_path() {
         let chain_spec = ChainSpecBuilder::mainnet().build();
         let (_static_dir, static_dir_path) = create_test_static_files_dir();
+        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
         let factory = ProviderFactory::<MockNodeTypesWithDB<DatabaseEnv>>::new_with_database_path(
             tempfile::TempDir::new().expect(ERROR_TEMPDIR).keep(),
             Arc::new(chain_spec),
             DatabaseArguments::new(Default::default()),
             StaticFileProvider::read_write(static_dir_path).unwrap(),
+            TrieDbProvider::open(triedb_dir_path).unwrap(),
         )
         .unwrap();
         let provider = factory.provider().unwrap();

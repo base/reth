@@ -59,6 +59,7 @@ use reth_ethereum::{
 };
 use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumExecutionPayloadValidator};
 use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderError};
+use reth_provider::{DatabaseProviderFactory, TrieDbTxProvider};
 use reth_tracing::{RethTracer, Tracer};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc};
@@ -281,6 +282,7 @@ pub type MyNodeAddOns<N> = RpcAddOns<N, EthereumEthApiBuilder, CustomEngineValid
 impl<N> Node<N> for MyCustomNode
 where
     N: FullNodeTypes<Types = Self>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,

@@ -35,7 +35,9 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter, PayloadBuilderConfig,
 };
 use reth_payload_primitives::PayloadTypes;
-use reth_provider::{providers::ProviderFactoryBuilder, EthStorage};
+use reth_provider::{
+    providers::ProviderFactoryBuilder, DatabaseProviderFactory, EthStorage, TrieDbTxProvider,
+};
 use reth_rpc::{
     eth::core::{EthApiFor, EthRpcConverterFor},
     ValidationApi,
@@ -372,6 +374,7 @@ where
 impl<N> Node<N> for EthereumNode
 where
     N: FullNodeTypes<Types = Self>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -394,7 +397,11 @@ where
     }
 }
 
-impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for EthereumNode {
+impl<N> DebugNode<N> for EthereumNode
+where
+    N: FullNodeComponents<Types = Self>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
+{
     type RpcBlock = alloy_rpc_types_eth::Block;
 
     fn rpc_to_primitive_block(rpc_block: Self::RpcBlock) -> reth_ethereum_primitives::Block {

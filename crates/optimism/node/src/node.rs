@@ -55,7 +55,10 @@ use reth_optimism_txpool::{
     supervisor::{SupervisorClient, DEFAULT_SUPERVISOR_URL},
     OpPooledTx,
 };
-use reth_provider::{providers::ProviderFactoryBuilder, CanonStateSubscriptions};
+use reth_provider::{
+    providers::ProviderFactoryBuilder, CanonStateSubscriptions, DatabaseProviderFactory,
+    TrieDbTxProvider,
+};
 use reth_rpc_api::{eth::RpcTypes, DebugApiServer, L2EthApiExtServer};
 use reth_rpc_server_types::RethRpcModule;
 use reth_tracing::tracing::{debug, info};
@@ -234,6 +237,7 @@ impl OpNode {
 impl<N> Node<N> for OpNode
 where
     N: FullNodeTypes<Types: OpFullNodeTypes + OpNodeTypes>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -264,6 +268,7 @@ where
 impl<N> DebugNode<N> for OpNode
 where
     N: FullNodeComponents<Types = Self>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
 {
     type RpcBlock = alloy_rpc_types_eth::Block<op_alloy_consensus::OpTxEnvelope>;
 

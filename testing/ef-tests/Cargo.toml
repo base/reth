@@ -34,6 +34,10 @@ reth-trie.workspace = true
 reth-trie-db.workspace = true
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit"] }
 
+# triedb
+#triedb = { git = "https://github.com/base/triedb" }
+triedb = { path = "/home/andrea/src/triedb" }
+
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true

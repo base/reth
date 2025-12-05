@@ -23,6 +23,7 @@ use reth_node_core::{
     version::{version_metadata, CLIENT_CODE},
 };
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
+use reth_provider::{DatabaseProviderFactory, TrieDbTxProvider};
 use reth_rpc::eth::{core::EthRpcConverterFor, DevSigner, EthApiTypes, FullEthApiServer};
 use reth_rpc_api::{eth::helpers::EthTransactions, IntoEngineApiRpcModule};
 use reth_rpc_builder::{
@@ -1292,6 +1293,7 @@ where
             <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
         >,
     >,
+    <Node::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
     EV: PayloadValidatorBuilder<Node>,
     EV::Validator: reth_engine_primitives::PayloadValidator<
         <Node::Types as NodeTypes>::Payload,

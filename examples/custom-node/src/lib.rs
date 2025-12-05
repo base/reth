@@ -29,6 +29,7 @@ use reth_op::{
     },
     rpc::OpEthApiBuilder,
 };
+use reth_provider::{DatabaseProviderFactory, TrieDbTxProvider};
 
 pub mod chainspec;
 pub mod engine;
@@ -53,6 +54,7 @@ impl NodeTypes for CustomNode {
 impl<N> Node<N> for CustomNode
 where
     N: FullNodeTypes<Types = Self>,
+    <N::Provider as DatabaseProviderFactory>::Provider: TrieDbTxProvider,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,

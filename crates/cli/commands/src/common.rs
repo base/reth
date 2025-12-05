@@ -21,7 +21,7 @@ use reth_node_core::{
     dirs::{ChainPath, DataDirPath},
 };
 use reth_provider::{
-    providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider},
+    providers::{BlockchainProvider, NodeTypesForProvider, StaticFileProvider, TrieDbProvider},
     ProviderFactory, StaticFileProviderFactory,
 };
 use reth_stages::{sets::DefaultStages, Pipeline, PipelineTarget};
@@ -69,10 +69,12 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         let data_dir = self.datadir.clone().resolve_datadir(self.chain.chain());
         let db_path = data_dir.db();
         let sf_path = data_dir.static_files();
+        let tdb_path = data_dir.triedb();
 
         if access.is_read_write() {
             reth_fs_util::create_dir_all(&db_path)?;
             reth_fs_util::create_dir_all(&sf_path)?;
+            reth_fs_util::create_dir_all(&tdb_path)?;
         }
 
         let config_path = self.config.clone().unwrap_or_else(|| data_dir.config());
@@ -91,7 +93,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             config.stages.era = config.stages.era.with_datadir(data_dir.data_dir());
         }
 
-        info!(target: "reth::cli", ?db_path, ?sf_path, "Opening storage");
+        info!(target: "reth::cli", ?db_path, ?sf_path, ?tdb_path, "Opening storage");
         let (db, sfp) = match access {
             AccessRights::RW => (
                 Arc::new(init_db(db_path, self.db.database_args())?),
@@ -102,8 +104,9 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
                 StaticFileProvider::read_only(sf_path, false)?,
             ),
         };
+        let tdb = TrieDbProvider::open(tdb_path)?;
 
-        let provider_factory = self.create_provider_factory(&config, db, sfp)?;
+        let provider_factory = self.create_provider_factory(&config, db, sfp, tdb)?;
         if access.is_read_write() {
             debug!(target: "reth::cli", chain=%self.chain.chain(), genesis=?self.chain.genesis_hash(), "Initializing genesis");
             init_genesis(&provider_factory)?;
@@ -122,6 +125,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         config: &Config,
         db: Arc<DatabaseEnv>,
         static_file_provider: StaticFileProvider<N::Primitives>,
+        triedb_provider: TrieDbProvider,
     ) -> eyre::Result<ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>>
     where
         C: ChainSpecParser<ChainSpec = N::ChainSpec>,
@@ -132,6 +136,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
             db,
             self.chain.clone(),
             static_file_provider,
+            triedb_provider,
         )
         .with_prune_modes(prune_modes.clone());
 

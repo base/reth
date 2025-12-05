@@ -65,7 +65,7 @@ use reth_node_metrics::{
     version::VersionInfo,
 };
 use reth_provider::{
-    providers::{NodeTypesForProvider, ProviderNodeTypes, StaticFileProvider},
+    providers::{NodeTypesForProvider, ProviderNodeTypes, StaticFileProvider, TrieDbProvider},
     BlockHashReader, BlockNumReader, ProviderError, ProviderFactory, ProviderResult,
     StageCheckpointReader, StaticFileProviderFactory,
 };
@@ -468,6 +468,7 @@ where
             self.right().clone(),
             self.chain_spec(),
             StaticFileProvider::read_write(self.data_dir().static_files())?,
+            TrieDbProvider::open(self.data_dir().triedb())?,
         )
         .with_prune_modes(self.prune_modes())
         .with_static_files_metrics();

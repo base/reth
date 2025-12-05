@@ -42,7 +42,9 @@ use alloy_rlp::{BufMut, Encodable};
 use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use dashmap::DashMap;
 use reth_execution_errors::{SparseTrieError, SparseTrieErrorKind};
-use reth_provider::{DatabaseProviderROFactory, ProviderError, ProviderResult};
+use reth_provider::{
+    providers::triedb::TrieDbTransaction, DatabaseProviderROFactory, ProviderError, ProviderResult,
+};
 use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     hashed_cursor::HashedCursorFactory,
@@ -379,6 +381,17 @@ impl<Factory> ProofTaskCtx<Factory> {
     pub const fn new(factory: Factory) -> Self {
         Self { factory }
     }
+}
+
+/// Transaction type for proof tasks that supports both Database and TrieDB backends
+#[derive(Debug)]
+pub enum ProofTaskTransaction<Tx> {
+    /// Database transaction
+    Database(Tx),
+    /// TrieDB transaction
+    TrieDb(TrieDbTransaction),
+    /// Both Database and TrieDB transactions
+    Both(Tx, TrieDbTransaction),
 }
 
 /// This contains all information shared between all storage proof instances.

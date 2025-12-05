@@ -23,3 +23,6 @@ pub use provider::{ProviderError, ProviderResult};
 
 /// Any error
 pub mod any;
+
+/// TrieDB error
+pub mod triedb;

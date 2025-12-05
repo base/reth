@@ -1,11 +1,13 @@
 use crate::{
-    providers::{ProviderNodeTypes, StaticFileProvider},
+    providers::{ProviderNodeTypes, StaticFileProvider, TrieDbProvider},
     HashingWriter, ProviderFactory, TrieWriter,
 };
 use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, MAINNET};
 use reth_db::{
-    test_utils::{create_test_rw_db, create_test_static_files_dir, TempDatabase},
+    test_utils::{
+        create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir, TempDatabase,
+    },
     DatabaseEnv,
 };
 use reth_errors::ProviderResult;
@@ -54,11 +56,13 @@ pub fn create_test_provider_factory_with_node_types<N: NodeTypes>(
     chain_spec: Arc<N::ChainSpec>,
 ) -> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<TempDatabase<DatabaseEnv>>>> {
     let (static_dir, _) = create_test_static_files_dir();
+    let (triedb_dir, _) = create_test_triedb_dir();
     let db = create_test_rw_db();
     ProviderFactory::new(
         db,
         chain_spec,
         StaticFileProvider::read_write(static_dir.keep()).expect("static file provider"),
+        TrieDbProvider::open(triedb_dir.keep()).unwrap(),
     )
 }
 

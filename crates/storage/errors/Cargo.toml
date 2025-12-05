@@ -25,6 +25,10 @@ alloy-rlp.workspace = true
 derive_more.workspace = true
 thiserror.workspace = true
 
+# triedb
+#triedb = { git = "https://github.com/base/triedb" }
+triedb = { path = "/home/andrea/src/triedb" }
+
 revm-database-interface.workspace = true
 
 [features]

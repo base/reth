@@ -1,4 +1,4 @@
-use crate::{any::AnyError, db::DatabaseError};
+use crate::{any::AnyError, db::DatabaseError, triedb::TrieDBError};
 use alloc::{boxed::Box, string::String};
 use alloy_eips::{BlockHashOrNumber, HashOrNumber};
 use alloy_primitives::{Address, BlockHash, BlockNumber, TxNumber, B256};
@@ -139,6 +139,9 @@ pub enum ProviderError {
         /// The available range of blocks with changesets
         available: core::ops::RangeInclusive<BlockNumber>,
     },
+    /// Error opening a read-only or read-write transaction from TrieDB
+    #[error(transparent)]
+    TrieDB(#[from] TrieDBError),
     /// Any other error type wrapped into a cloneable [`AnyError`].
     #[error(transparent)]
     Other(#[from] AnyError),

@@ -1,9 +1,10 @@
 use crate::{
+    providers::TrieDbTransaction,
     traits::{BlockSource, ReceiptProvider},
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt,
     ChainSpecProvider, ChangeSetReader, HeaderProvider, PruneCheckpointReader,
     ReceiptProviderIdExt, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
-    StateRootProvider, TransactionVariant, TransactionsProvider,
+    StateRootProvider, TransactionVariant, TransactionsProvider, TrieDbTxProvider,
 };
 use alloy_consensus::{
     constants::EMPTY_ROOT_HASH,
@@ -857,6 +858,24 @@ where
 
     fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
         Ok(Vec::default())
+    }
+}
+
+impl<T, ChainSpec> TrieDbTxProvider for MockEthProvider<T, ChainSpec>
+where
+    T: NodePrimitives,
+    ChainSpec: Send + Sync,
+{
+    fn triedb_tx_ref(&self) -> &TrieDbTransaction {
+        panic!("not implemented");
+    }
+
+    fn triedb_tx(&mut self) -> &mut TrieDbTransaction {
+        panic!("not implemented");
+    }
+
+    fn into_triedb_tx(self) -> TrieDbTransaction {
+        panic!("not implemented");
     }
 }
 

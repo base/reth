@@ -17,7 +17,7 @@ use reth_provider::{
     BundleStateInit, ChainSpecProvider, DBProvider, DatabaseProviderFactory, ExecutionOutcome,
     HashingWriter, HeaderProvider, HistoryWriter, OriginalValuesKnown, ProviderError, RevertsInit,
     StageCheckpointReader, StageCheckpointWriter, StateWriter, StaticFileProviderFactory,
-    TrieWriter,
+    TrieDbProviderFactory, TrieDbTxProvider, TrieWriter,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -90,7 +90,8 @@ where
         + StaticFileProviderFactory<Primitives: NodePrimitives<BlockHeader: Compact>>
         + ChainSpecProvider
         + StageCheckpointReader
-        + BlockHashReader,
+        + BlockHashReader
+        + TrieDbProviderFactory,
     PF::ProviderRW: StaticFileProviderFactory<Primitives = PF::Primitives>
         + StageCheckpointWriter
         + HistoryWriter
@@ -98,6 +99,7 @@ where
         + HashingWriter
         + StateWriter
         + TrieWriter
+        + TrieDbTxProvider
         + AsRef<PF::ProviderRW>,
     PF::ChainSpec: EthChainSpec<Header = <PF::Primitives as NodePrimitives>::BlockHeader>,
 {
@@ -723,6 +725,7 @@ mod tests {
     fn fail_init_inconsistent_db() {
         let factory = create_test_provider_factory_with_chain_spec(SEPOLIA.clone());
         let static_file_provider = factory.static_file_provider();
+        let triedb_provider = factory.triedb_provider();
         init_genesis(&factory).unwrap();
 
         // Try to init db with a different genesis block
@@ -730,6 +733,7 @@ mod tests {
             factory.into_db(),
             MAINNET.clone(),
             static_file_provider,
+            triedb_provider,
         ));
 
         assert!(matches!(
