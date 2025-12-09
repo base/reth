@@ -26,8 +26,7 @@ derive_more.workspace = true
 thiserror.workspace = true
 
 # triedb
-#triedb = { git = "https://github.com/base/triedb" }
-triedb = { path = "/home/andrea/src/triedb" }
+triedb = { git = "https://github.com/base/triedb" }
 
 revm-database-interface.workspace = true
 

@@ -13046,6 +13046,7 @@ dependencies = [
 [[package]]
 name = "triedb"
 version = "0.1.0"
+source = "git+https://github.com/base/triedb#cedd1a33084ddb2724240193c39df3fbdec1dba0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",

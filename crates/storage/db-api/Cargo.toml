@@ -23,8 +23,7 @@ reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
 
 # triedb
-#triedb = { git = "https://github.com/base/triedb" }
-triedb = { path = "/home/andrea/src/triedb" }
+triedb = { git = "https://github.com/base/triedb" }
 
 # ethereum
 alloy-primitives.workspace = true

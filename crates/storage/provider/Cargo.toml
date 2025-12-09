@@ -43,8 +43,7 @@ revm-database.workspace = true
 revm-state = { workspace = true, optional = true }
 
 # triedb
-#triedb = { git = "https://github.com/base/triedb" }
-triedb = { path = "/home/andrea/src/triedb" }
+triedb = { git = "https://github.com/base/triedb" }
 
 # tracing
 tracing.workspace = true
