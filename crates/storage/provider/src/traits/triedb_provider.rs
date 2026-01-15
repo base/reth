@@ -3,6 +3,8 @@
 use crate::providers::{TrieDbProvider, TrieDbTransaction};
 
 /// TrieDB provider factory.
+///
+/// This trait provides access to the TrieDB provider.
 pub trait TrieDbProviderFactory {
     /// Create new instance of TrieDB provider.
     fn triedb_provider(&self) -> TrieDbProvider;

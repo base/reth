@@ -10,8 +10,8 @@ use reth_node_builder::{EngineNodeLauncher, Node, NodeBuilder, NodeConfig, NodeH
 use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_node_ethereum::EthereumNode;
 use reth_provider::{
-    providers::{BlockchainProvider, TrieDbProvider},
-    DatabaseProviderFactory, ProviderFactory, StageCheckpointReader, StaticFileProviderFactory,
+    providers::BlockchainProvider, DatabaseProviderFactory, ProviderFactory, StageCheckpointReader,
+    StaticFileProviderFactory,
 };
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_stages_types::StageId;
@@ -126,7 +126,7 @@ pub async fn setup_engine_with_chain_import(
             db.clone(),
             chain_spec.clone(),
             reth_provider::providers::StaticFileProvider::read_write(static_files_path.clone())?,
-            TrieDbProvider::open(triedb_path)?,
+            reth_provider::providers::TrieDbProvider::open(triedb_path)?,
         );
 
         // Initialize genesis if needed
@@ -327,7 +327,7 @@ mod tests {
                 chain_spec.clone(),
                 reth_provider::providers::StaticFileProvider::read_write(static_files_path.clone())
                     .unwrap(),
-                TrieDbProvider::open(&triedb_path).unwrap(),
+                reth_provider::providers::TrieDbProvider::open(&triedb_path).unwrap(),
             );
 
             // Initialize genesis
@@ -388,7 +388,7 @@ mod tests {
                 chain_spec.clone(),
                 reth_provider::providers::StaticFileProvider::read_only(static_files_path, false)
                     .unwrap(),
-                TrieDbProvider::open(triedb_path).unwrap(),
+                reth_provider::providers::TrieDbProvider::open(triedb_path).unwrap(),
             );
 
             let provider = provider_factory.database_provider_ro().unwrap();
@@ -481,7 +481,7 @@ mod tests {
             db.clone(),
             chain_spec.clone(),
             reth_provider::providers::StaticFileProvider::read_write(static_files_path).unwrap(),
-            TrieDbProvider::open(triedb_path).unwrap(),
+            reth_provider::providers::TrieDbProvider::open(triedb_path).unwrap(),
         );
 
         // Initialize genesis

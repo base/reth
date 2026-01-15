@@ -114,8 +114,7 @@ impl<N> ProviderFactoryBuilder<N> {
             .db(Arc::new(open_db_read_only(db_dir, db_args)?))
             .chainspec(chainspec)
             .static_file(StaticFileProvider::read_only(static_files_dir, watch_static_files)?)
-            // TODO: remove unwrap
-            .triedb(TrieDbProvider::open(triedb_dir).unwrap())
+            .triedb(TrieDbProvider::open(triedb_dir)?)
             .build_provider_factory())
     }
 }

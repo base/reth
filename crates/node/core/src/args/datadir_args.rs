@@ -27,6 +27,15 @@ pub struct DatadirArgs {
         verbatim_doc_comment
     )]
     pub static_files_path: Option<PathBuf>,
+
+    /// The absolute path to store triedb in.
+    #[arg(
+        long = "datadir.triedb",
+        alias = "datadir.triedb",
+        value_name = "PATH",
+        verbatim_doc_comment
+    )]
+    pub triedb_path: Option<PathBuf>,
 }
 
 impl DatadirArgs {

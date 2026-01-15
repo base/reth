@@ -305,7 +305,12 @@ impl<D> ChainPath<D> {
     ///
     /// `<DIR>/<CHAIN_ID>/triedb`
     pub fn triedb(&self) -> PathBuf {
-        self.data_dir().join("triedb")
+        let datadir_args = &self.2;
+        if let Some(triedb_path) = &datadir_args.triedb_path {
+            triedb_path.clone()
+        } else {
+            self.data_dir().join("triedb")
+        }
     }
 
     /// Returns the path to the reth p2p secret key for this chain.
