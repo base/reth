@@ -301,7 +301,19 @@ impl<D> ChainPath<D> {
         }
     }
 
-    /// Returns the path to the TrieDB directory for this chain.
+    /// Returns the path to the `RocksDB` database directory for this chain.
+    ///
+    /// `<DIR>/<CHAIN_ID>/rocksdb`
+    pub fn rocksdb(&self) -> PathBuf {
+        let datadir_args = &self.2;
+        if let Some(rocksdb_path) = &datadir_args.rocksdb_path {
+            rocksdb_path.clone()
+        } else {
+            self.data_dir().join("rocksdb")
+        }
+    }
+
+    /// Returns the path to the `TrieDB` database directory for this chain.
     ///
     /// `<DIR>/<CHAIN_ID>/triedb`
     pub fn triedb(&self) -> PathBuf {
@@ -310,6 +322,18 @@ impl<D> ChainPath<D> {
             triedb_path.clone()
         } else {
             self.data_dir().join("triedb")
+        }
+    }
+
+    /// Returns the path to the directory for storing pprof dumps for this chain.
+    ///
+    /// `<DIR>/<CHAIN_ID>/pprof`
+    pub fn pprof_dumps(&self) -> PathBuf {
+        let datadir_args = &self.2;
+        if let Some(pprof_dumps_path) = &datadir_args.pprof_dumps_path {
+            pprof_dumps_path.clone()
+        } else {
+            self.data_dir().join("pprof")
         }
     }
 

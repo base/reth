@@ -28,14 +28,17 @@ pub struct DatadirArgs {
     )]
     pub static_files_path: Option<PathBuf>,
 
-    /// The absolute path to store triedb in.
-    #[arg(
-        long = "datadir.triedb",
-        alias = "datadir.triedb",
-        value_name = "PATH",
-        verbatim_doc_comment
-    )]
+    /// The absolute path to store `RocksDB` database in.
+    #[arg(long = "datadir.rocksdb", value_name = "PATH", verbatim_doc_comment)]
+    pub rocksdb_path: Option<PathBuf>,
+
+    /// The absolute path to store `TrieDB` database in.
+    #[arg(long = "datadir.triedb", value_name = "PATH", verbatim_doc_comment)]
     pub triedb_path: Option<PathBuf>,
+
+    /// The absolute path to store pprof dumps in.
+    #[arg(long = "datadir.pprof-dumps", value_name = "PATH", verbatim_doc_comment)]
+    pub pprof_dumps_path: Option<PathBuf>,
 }
 
 impl DatadirArgs {

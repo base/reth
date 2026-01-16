@@ -24,7 +24,7 @@ use reth_ethereum::{
     pool::noop::NoopTransactionPool,
     provider::{
         db::{mdbx::DatabaseArguments, open_db_read_only, ClientVersion, DatabaseEnv},
-        providers::{BlockchainProvider, StaticFileProvider, TrieDbProvider},
+        providers::{BlockchainProvider, RocksDBProvider, StaticFileProvider, TrieDbProvider},
         ProviderFactory,
     },
     rpc::{
@@ -53,8 +53,9 @@ async fn main() -> eyre::Result<()> {
         db.clone(),
         spec.clone(),
         StaticFileProvider::read_only(db_path.join("static_files"), true)?,
+        RocksDBProvider::builder(db_path.join("rocksdb")).build().unwrap(),
         TrieDbProvider::open(db_path.join("triedb"))?,
-    );
+    )?;
 
     // 2. Set up the blockchain provider using only the database provider and a noop for the tree to
     //    satisfy trait bounds. Tree is not used in this example since we are only operating on the
@@ -81,7 +82,7 @@ async fn main() -> eyre::Result<()> {
     // Pick which namespaces to expose.
     let config = TransportRpcModuleConfig::default().with_http([RethRpcModule::Eth]);
 
-    let mut server = rpc_builder.build(config, eth_api);
+    let mut server = rpc_builder.build(config, eth_api, Default::default());
 
     // Add a custom rpc namespace
     let custom_rpc = MyRpcExt { provider };

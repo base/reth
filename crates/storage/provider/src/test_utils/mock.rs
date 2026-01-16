@@ -119,7 +119,6 @@ impl<T: NodePrimitives, ChainSpec> MockEthProvider<T, ChainSpec> {
     /// Add multiple blocks to local block store
     pub fn extend_blocks(&self, iter: impl IntoIterator<Item = (B256, T::Block)>) {
         for (hash, block) in iter {
-            self.add_header(hash, block.header().clone());
             self.add_block(hash, block)
         }
     }
@@ -400,18 +399,6 @@ impl<T: NodePrimitives, ChainSpec: EthChainSpec + 'static> TransactionsProvider
                     return Ok(Some((tx.clone(), meta)))
                 }
             }
-        }
-        Ok(None)
-    }
-
-    fn transaction_block(&self, id: TxNumber) -> ProviderResult<Option<BlockNumber>> {
-        let lock = self.blocks.lock();
-        let mut current_tx_number: TxNumber = 0;
-        for block in lock.values() {
-            if current_tx_number + (block.body().transaction_count() as TxNumber) > id {
-                return Ok(Some(block.header().number()))
-            }
-            current_tx_number += block.body().transaction_count() as TxNumber;
         }
         Ok(None)
     }
@@ -1008,6 +995,17 @@ impl<T: NodePrimitives, ChainSpec: Send + Sync> ChangeSetReader for MockEthProvi
         _address: Address,
     ) -> ProviderResult<Option<AccountBeforeTx>> {
         Ok(None)
+    }
+
+    fn account_changesets_range(
+        &self,
+        _range: impl core::ops::RangeBounds<BlockNumber>,
+    ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
+        Ok(Vec::default())
+    }
+
+    fn account_changeset_count(&self) -> ProviderResult<usize> {
+        Ok(0)
     }
 }
 

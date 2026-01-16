@@ -1,18 +1,18 @@
 use crate::{
-    providers::{ProviderNodeTypes, StaticFileProvider, TrieDbProvider},
+    providers::{NodeTypesForProvider, ProviderNodeTypes, RocksDBBuilder, StaticFileProvider, TrieDbProvider},
     HashingWriter, ProviderFactory, TrieWriter,
 };
 use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, MAINNET};
 use reth_db::{
     test_utils::{
-        create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir, TempDatabase,
+        create_test_rocksdb_dir, create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir, TempDatabase,
     },
     DatabaseEnv,
 };
 use reth_errors::ProviderResult;
 use reth_ethereum_engine_primitives::EthEngineTypes;
-use reth_node_types::{NodeTypes, NodeTypesWithDBAdapter};
+use reth_node_types::NodeTypesWithDBAdapter;
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie::StateRoot;
 use reth_trie_db::DatabaseStateRoot;
@@ -52,18 +52,24 @@ pub fn create_test_provider_factory_with_chain_spec(
 }
 
 /// Creates test provider factory with provided chain spec.
-pub fn create_test_provider_factory_with_node_types<N: NodeTypes>(
+pub fn create_test_provider_factory_with_node_types<N: NodeTypesForProvider>(
     chain_spec: Arc<N::ChainSpec>,
 ) -> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<TempDatabase<DatabaseEnv>>>> {
     let (static_dir, _) = create_test_static_files_dir();
+    let (rocksdb_dir, _) = create_test_rocksdb_dir();
     let (triedb_dir, _) = create_test_triedb_dir();
     let db = create_test_rw_db();
     ProviderFactory::new(
         db,
         chain_spec,
         StaticFileProvider::read_write(static_dir.keep()).expect("static file provider"),
-        TrieDbProvider::open(triedb_dir.keep()).unwrap(),
+        RocksDBBuilder::new(&rocksdb_dir)
+            .with_default_tables()
+            .build()
+            .expect("failed to create test RocksDB provider"),
+        TrieDbProvider::open(triedb_dir.keep()).expect("failed to create test TrieDB provider"),
     )
+    .expect("failed to create test provider factory")
 }
 
 /// Inserts the genesis alloc from the provided chain spec into the trie.
@@ -90,9 +96,7 @@ pub fn insert_genesis<N: ProviderNodeTypes<ChainSpec = ChainSpec>>(
     });
     provider.insert_storage_for_hashing(alloc_storage)?;
 
-    let (root, updates) = StateRoot::from_tx(provider.tx_ref())
-        .root_with_updates()
-        .map_err(reth_db::DatabaseError::from)?;
+    let (root, updates) = StateRoot::from_tx(provider.tx_ref()).root_with_updates()?;
     provider.write_trie_updates(updates).unwrap();
 
     provider.commit()?;

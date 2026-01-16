@@ -159,6 +159,14 @@ pub mod test_utils {
         (temp_dir, path)
     }
 
+    /// Create `rocksdb` path for testing
+    #[track_caller]
+    pub fn create_test_rocksdb_dir() -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::with_prefix("reth-test-rocksdb-").expect(ERROR_TEMPDIR);
+        let path = temp_dir.path().to_path_buf();
+        (temp_dir, path)
+    }
+
     /// Create `triedb` path for testing
     #[track_caller]
     pub fn create_test_triedb_dir() -> (TempDir, PathBuf) {
@@ -193,12 +201,13 @@ pub mod test_utils {
     #[track_caller]
     pub fn create_test_rw_db_with_path<P: AsRef<Path>>(path: P) -> Arc<TempDatabase<DatabaseEnv>> {
         let path = path.as_ref().to_path_buf();
+        let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
         let db = init_db(
             path.as_path(),
             DatabaseArguments::new(ClientVersion::default())
                 .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded)),
         )
-        .expect(ERROR_DB_CREATION);
+        .expect(&emsg);
         Arc::new(TempDatabase::new(db, path))
     }
 
@@ -209,8 +218,9 @@ pub mod test_utils {
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
 
         let path = tempdir_path();
+        let emsg = format!("{ERROR_DB_CREATION}: {path:?}");
         {
-            init_db(path.as_path(), args.clone()).expect(ERROR_DB_CREATION);
+            init_db(path.as_path(), args.clone()).expect(&emsg);
         }
         let db = open_db_read_only(path.as_path(), args).expect(ERROR_DB_OPEN);
         Arc::new(TempDatabase::new(db, path))

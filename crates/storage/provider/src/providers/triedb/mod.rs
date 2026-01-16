@@ -72,7 +72,7 @@ impl TrieDbProvider {
             if !path.as_ref().exists() {
                 create_dir_all(path).expect("unable to create directory for triedb");
             }
-            Database::create_new(database_file_path.to_str().expect("Path must be valid UTF-8"))
+            Database::options().create_new(true).max_pages(1000000).open(database_file_path.to_str().expect("Path must be valid UTF-8"))
                 .map_err(|e| {
                     ProviderError::Database(DatabaseError::Other(format!(
                         "TrieDB creation failed: {:?}",
@@ -128,19 +128,6 @@ impl TrieDbTransaction {
         };
 
         Ok(storage)
-    }
-
-    pub fn apply_changes(&self) -> ProviderResult<()> {
-        match &mut *self.inner.lock().unwrap() {
-            TrieDbTransactionInner::RW(_tx) => {
-                // TODO: apply changes
-                // tx.apply_changes()?;
-            }
-            TrieDbTransactionInner::RO(_) => {
-                // Read-only transactions don't have changes to apply
-            }
-        }
-        Ok(())
     }
 
     pub fn commit(self) -> ProviderResult<()> {
@@ -434,10 +421,6 @@ impl TrieDbTxRW for TrieDbTransaction {
             }
         }
     }
-
-    fn apply_changes(&self) -> Result<(), DatabaseError> {
-        self.apply_changes().map_err(|e| DatabaseError::Other(e.to_string()))
-    }
 }
 
 #[cfg(test)]
@@ -489,12 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn test_triedb_provider_creation() {
-        let (_provider, _temp_dir) = create_test_triedb_provider();
-        // Provider creation should succeed without panicking
-    }
-
-    #[test]
     fn test_triedb_transaction_creation() {
         let (provider, _temp_dir) = create_test_triedb_provider();
 
@@ -520,10 +497,11 @@ mod tests {
         let result = tx.set_account_address(address, Some(account));
         assert!(result.is_ok());
 
-        // Apply changes to make them visible in the trie
-        tx.apply_changes().expect("Failed to apply changes");
+        // Commit changes to make them visible in the trie
+        tx.commit().expect("Failed to apply changes");
+        let tx = provider.tx().expect("Failed to create RO transaction");
 
-        // Get account - should be visible after apply_changes
+        // Get account - should be visible after commit
         let address_path = AddressPath::for_address(address);
         let retrieved = tx.get_account(address_path).expect("Failed to get account");
         assert!(retrieved.is_some(), "Account should be visible after applying changes");
@@ -546,16 +524,14 @@ mod tests {
         let storage_key = B256::from([0x01; 32]);
         let storage_value = U256::from(0x1234);
 
-        // Apply changes for account to be visible
-        tx.apply_changes().expect("Failed to apply account changes");
-
         // Set storage - use keccak hash of address
         let hashed_address = alloy_primitives::keccak256(address.0);
         tx.set_storage_slot(hashed_address, storage_key, Some(storage_value))
             .expect("Failed to set storage slot");
 
-        // Apply changes to make storage visible in the trie
-        tx.apply_changes().expect("Failed to apply storage changes");
+        // Commit changes to make storage visible in the trie
+        tx.commit().expect("Failed to apply storage changes");
+        let tx = provider.tx().expect("Failed to create RO transaction");
 
         // Get storage - should be visible after apply_changes
         // Use the same path construction as in set_storage_slot

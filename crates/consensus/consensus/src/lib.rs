@@ -11,12 +11,13 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, fmt::Debug, string::String, vec::Vec};
+use alloc::{boxed::Box, fmt::Debug, string::String, sync::Arc, vec::Vec};
 use alloy_consensus::Header;
 use alloy_primitives::{BlockHash, BlockNumber, Bloom, B256};
+use core::error::Error;
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
-    constants::{MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
+    constants::{GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
     transaction::error::InvalidTransactionError,
     Block, GotExpected, GotExpectedBoxed, NodePrimitives, RecoveredBlock, SealedBlock,
     SealedHeader,
@@ -49,15 +50,12 @@ pub trait FullConsensus<N: NodePrimitives>: Consensus<N::Block> {
 /// Consensus is a protocol that chooses canonical chain.
 #[auto_impl::auto_impl(&, Arc)]
 pub trait Consensus<B: Block>: HeaderValidator<B::Header> {
-    /// The error type related to consensus.
-    type Error;
-
     /// Ensures that body field values match the header.
     fn validate_body_against_header(
         &self,
         body: &B::Body,
         header: &SealedHeader<B::Header>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), ConsensusError>;
 
     /// Validate a block disregarding world state, i.e. things that can be checked before sender
     /// recovery and execution.
@@ -69,7 +67,7 @@ pub trait Consensus<B: Block>: HeaderValidator<B::Header> {
     /// **This should not be called for the genesis block**.
     ///
     /// Note: validating blocks does not include other validations of the Consensus
-    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), Self::Error>;
+    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), ConsensusError>;
 }
 
 /// `HeaderValidator` is a protocol that validates headers and their relationships.
@@ -125,7 +123,7 @@ pub trait HeaderValidator<H = Header>: Debug + Send + Sync {
 }
 
 /// Consensus Errors
-#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ConsensusError {
     /// Error when the gas used in the header exceeds the gas limit.
     #[error("block used gas ({gas_used}) is greater than gas limit ({gas_limit})")]
@@ -135,7 +133,7 @@ pub enum ConsensusError {
         /// The gas limit in the block header.
         gas_limit: u64,
     },
-    /// Error when the gas the gas limit is more than the maximum allowed.
+    /// Error when the gas limit is more than the maximum allowed.
     #[error(
         "header gas limit ({gas_limit}) exceed the maximum allowed gas limit ({MAXIMUM_GAS_LIMIT_BLOCK})"
     )]
@@ -349,7 +347,7 @@ pub enum ConsensusError {
     },
 
     /// Error when the child gas limit exceeds the maximum allowed increase.
-    #[error("child gas_limit {child_gas_limit} max increase is {parent_gas_limit}/1024")]
+    #[error("child gas_limit {child_gas_limit} exceeds the max allowed increase ({parent_gas_limit}/{GAS_LIMIT_BOUND_DIVISOR})")]
     GasLimitInvalidIncrease {
         /// The parent gas limit.
         parent_gas_limit: u64,
@@ -378,7 +376,7 @@ pub enum ConsensusError {
     },
 
     /// Error when the child gas limit exceeds the maximum allowed decrease.
-    #[error("child gas_limit {child_gas_limit} max decrease is {parent_gas_limit}/1024")]
+    #[error("child gas_limit {child_gas_limit} is below the max allowed decrease ({parent_gas_limit}/{GAS_LIMIT_BOUND_DIVISOR})")]
     GasLimitInvalidDecrease {
         /// The parent gas limit.
         parent_gas_limit: u64,
@@ -410,6 +408,9 @@ pub enum ConsensusError {
     /// Other, likely an injected L2 error.
     #[error("{0}")]
     Other(String),
+    /// Other unspecified error.
+    #[error(transparent)]
+    Custom(#[from] Arc<dyn Error + Send + Sync>),
 }
 
 impl ConsensusError {
@@ -446,4 +447,35 @@ pub struct TxGasLimitTooHighErr {
     pub gas_limit: u64,
     /// The maximum allowed gas limit
     pub max_allowed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(thiserror::Error, Debug)]
+    #[error("Custom L2 consensus error")]
+    struct CustomL2Error;
+
+    #[test]
+    fn test_custom_error_conversion() {
+        // Test conversion from custom error to ConsensusError
+        let custom_err = CustomL2Error;
+        let arc_err: Arc<dyn Error + Send + Sync> = Arc::new(custom_err);
+        let consensus_err: ConsensusError = arc_err.into();
+
+        // Verify it's the Custom variant
+        assert!(matches!(consensus_err, ConsensusError::Custom(_)));
+    }
+
+    #[test]
+    fn test_custom_error_display() {
+        let custom_err = CustomL2Error;
+        let arc_err: Arc<dyn Error + Send + Sync> = Arc::new(custom_err);
+        let consensus_err: ConsensusError = arc_err.into();
+
+        // Verify the error message is preserved through transparent attribute
+        let error_message = format!("{}", consensus_err);
+        assert_eq!(error_message, "Custom L2 consensus error");
+    }
 }

@@ -5,7 +5,7 @@ use alloy_primitives::BlockNumber;
 use futures::Stream;
 use futures_util::StreamExt;
 use reth_config::BodiesConfig;
-use reth_consensus::{Consensus, ConsensusError};
+use reth_consensus::Consensus;
 use reth_network_p2p::{
     bodies::{
         client::BodiesClient,
@@ -41,7 +41,7 @@ pub struct BodiesDownloader<
     /// The bodies client
     client: Arc<C>,
     /// The consensus client
-    consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+    consensus: Arc<dyn Consensus<B>>,
     /// The database handle
     provider: Provider,
     /// The maximum number of non-empty blocks per one request
@@ -307,12 +307,14 @@ where
 {
     type Block = B;
 
-    /// Set a new download range (exclusive).
+    /// Set a new download range (inclusive).
     ///
-    /// This method will drain all queued bodies, filter out ones outside the range and put them
-    /// back into the buffer.
-    /// If there are any bodies between the range start and last queued body that have not been
-    /// downloaded or are not in progress, they will be re-requested.
+    /// If the provided range is a suffix of the current range with the same end block, the
+    /// existing download already covers it and the call is a no-op.
+    /// If the range starts immediately after the current range, it is treated as the next
+    /// consecutive range and appended without resetting the in-flight state.
+    /// For all other ranges, the downloader state is cleared and the new range replaces the old
+    /// one.
     fn set_download_range(&mut self, range: RangeInclusive<BlockNumber>) -> DownloadResult<()> {
         // Check if the range is valid.
         if range.is_empty() {
@@ -577,7 +579,7 @@ impl BodiesDownloaderBuilder {
     pub fn build<B, C, Provider>(
         self,
         client: C,
-        consensus: Arc<dyn Consensus<B, Error = ConsensusError>>,
+        consensus: Arc<dyn Consensus<B>>,
         provider: Provider,
     ) -> BodiesDownloader<B, C, Provider>
     where
@@ -624,12 +626,10 @@ mod tests {
     use reth_chainspec::MAINNET;
     use reth_consensus::test_utils::TestConsensus;
     use reth_db::test_utils::{
-        create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir,
+        create_test_rocksdb_dir, create_test_rw_db, create_test_static_files_dir, create_test_triedb_dir
     };
     use reth_provider::{
-        providers::{StaticFileProvider, TrieDbProvider},
-        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
-        ProviderFactory,
+        ProviderFactory, providers::{RocksDBProvider, StaticFileProvider, TrieDbProvider}, test_utils::{MockNodeTypesWithDB, create_test_provider_factory}
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
     use std::collections::HashMap;
@@ -639,14 +639,7 @@ mod tests {
     #[tokio::test]
     async fn streams_bodies_in_order() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=19);
 
         insert_headers(&factory, &headers);
@@ -675,14 +668,7 @@ mod tests {
     #[tokio::test]
     async fn requests_correct_number_of_times() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let mut rng = generators::rng();
         let blocks = random_block_range(
             &mut rng,
@@ -719,14 +705,7 @@ mod tests {
     #[tokio::test]
     async fn streams_bodies_in_order_after_range_reset() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=99);
 
         insert_headers(&factory, &headers);
@@ -763,14 +742,7 @@ mod tests {
     #[tokio::test]
     async fn can_download_new_range_after_termination() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=199);
 
         insert_headers(&factory, &headers);
@@ -807,14 +779,7 @@ mod tests {
     #[tokio::test]
     async fn can_download_after_exceeding_limit() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=199);
 
         insert_headers(&factory, &headers);
@@ -846,14 +811,7 @@ mod tests {
     #[tokio::test]
     async fn can_tolerate_empty_responses() {
         // Generate some random blocks
-        let (_static_dir, static_dir_path) = create_test_static_files_dir();
-        let (_triedb_dir, triedb_dir_path) = create_test_triedb_dir();
-        let factory = ProviderFactory::<MockNodeTypesWithDB>::new(
-            create_test_rw_db(),
-            MAINNET.clone(),
-            StaticFileProvider::read_write(static_dir_path).unwrap(),
-            TrieDbProvider::open(triedb_dir_path).unwrap(),
-        );
+        let factory = create_test_provider_factory();
         let (headers, mut bodies) = generate_bodies(0..=99);
 
         insert_headers(&factory, &headers);

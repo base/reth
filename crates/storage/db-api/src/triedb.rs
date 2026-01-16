@@ -41,6 +41,4 @@ pub trait TrieDbTxRW: TrieDbTx {
         storage_path: StoragePath,
         value: Option<StorageValue>,
     ) -> Result<(), DatabaseError>;
-    /// Apply all pending changes to the database.
-    fn apply_changes(&self) -> Result<(), DatabaseError>;
 }
