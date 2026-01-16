@@ -128,7 +128,7 @@ impl<DB: Database, N: NodeTypes> AsRef<DatabaseProvider<<DB as Database>::TXMut,
 
 impl<DB: Database, N: NodeTypes + 'static> DatabaseProviderRW<DB, N> {
     /// Commit database transaction and static file if it exists.
-    pub fn commit(self) -> ProviderResult<bool> {
+    pub fn commit(self) -> ProviderResult<()> {
         self.0.commit()
     }
 
@@ -3512,7 +3512,7 @@ impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider
     }
 
     /// Commit database transaction, static files, and pending `RocksDB` batches.
-    fn commit(self) -> ProviderResult<bool> {
+    fn commit(self) -> ProviderResult<()> {
         // For unwinding it makes more sense to commit the database first, since if
         // it is interrupted before the static files commit, we can just
         // truncate the static files according to the
@@ -3545,7 +3545,7 @@ impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider
             self.triedb_tx.commit()?;
         }
 
-        Ok(true)
+        Ok(())
     }
 }
 
