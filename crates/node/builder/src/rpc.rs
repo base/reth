@@ -3,6 +3,7 @@
 pub use jsonrpsee::server::middleware::rpc::{RpcService, RpcServiceBuilder};
 pub use reth_engine_tree::tree::{BasicEngineValidator, EngineValidator};
 pub use reth_rpc_builder::{middleware::RethRpcMiddleware, Identity, Stack};
+pub use reth_trie_db::ChangesetCache;
 
 use crate::{
     invalid_block_hook::InvalidBlockHookExt, ConfigureEngineEvm, ConsensusEngineEvent,
@@ -1289,6 +1290,7 @@ pub trait EngineValidatorBuilder<Node: FullNodeComponents>: Send + Sync + Clone 
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: TreeConfig,
+        changeset_cache: ChangesetCache,
     ) -> impl Future<Output = eyre::Result<Self::EngineValidator>> + Send;
 }
 
@@ -1337,10 +1339,12 @@ where
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: TreeConfig,
+        changeset_cache: ChangesetCache,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx.config.datadir.clone().resolve_datadir(ctx.config.chain.chain());
         let invalid_block_hook = ctx.create_invalid_block_hook(&data_dir).await?;
+
         Ok(BasicEngineValidator::new(
             ctx.node.provider().clone(),
             std::sync::Arc::new(ctx.node.consensus().clone()),
@@ -1348,6 +1352,7 @@ where
             validator,
             tree_config,
             invalid_block_hook,
+            changeset_cache,
         ))
     }
 }

@@ -6,7 +6,7 @@ use alloy_primitives::{
 };
 use alloy_trie::Nibbles;
 use reth_trie::{
-    HashedPostState, HashedPostStateSorted, TrieInput, TrieInputSorted, updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesSorted}
+    HashedPostStateSorted, updates::{StorageTrieUpdates, TrieUpdates, TrieUpdatesSorted}
 };
 use reth_trie_common::prefix_set::TriePrefixSets;
 use triedb::{overlay::{OverlayState, OverlayStateMut, OverlayValue}, path::RawPath};
@@ -23,12 +23,12 @@ pub struct TrieDbOverlayStateRoot {
 }
 
 impl TrieDbOverlayStateRoot {
-    pub fn new(tx: TrieDbTransaction, input: TrieInputSorted) -> Self {
+    pub fn new(tx: TrieDbTransaction, input_nodes: Arc<TrieUpdatesSorted>, input_state: Arc<HashedPostStateSorted>, input_prefix_sets: TriePrefixSets) -> Self {
         Self {
             tx,
-            input_nodes: input.nodes.clone(),
-            input_state: input.state.clone(),
-            input_prefix_sets: input.prefix_sets.freeze(),
+            input_nodes,
+            input_state,
+            input_prefix_sets,
         }
     }
 
@@ -243,7 +243,9 @@ mod tests {
         // Phase 3: Calculate state root WITH overlay
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -270,7 +272,9 @@ mod tests {
         // Phase 6: Calculate state root again with empty overlay (should match committed)
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -310,7 +314,9 @@ mod tests {
         // Calculate state root
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let state_root_result = state_root_calc.incremental_root();
 
@@ -380,16 +386,17 @@ mod tests {
             }),
         );
 
-        let trie_input = TrieInput::from_state(hashed_state);
 
         // Phase 3: Calculate state root with overlay
         println!(
             "DEBUG: Starting overlay state root calculation with {} accounts in overlay",
-            trie_input.state.accounts.len()
+            hashed_state.accounts.len()
         );
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(trie_input),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -427,7 +434,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -499,7 +508,9 @@ mod tests {
         println!("=== Testing overlay with only account 3 modified ===");
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -592,7 +603,9 @@ mod tests {
         println!("=== Testing exact failing scenario: 5 accounts, modify 1,3,5 ===");
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -691,7 +704,9 @@ mod tests {
         // Phase 3: Calculate state root with overlays
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.into_sorted()),
+            TriePrefixSets::default(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -742,7 +757,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -819,7 +836,9 @@ mod tests {
         // Phase 3: Calculate state root with deletions
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -844,7 +863,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -928,7 +949,9 @@ mod tests {
         // Phase 3: Calculate state root with additions
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state)),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -955,7 +978,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -1048,7 +1073,9 @@ mod tests {
         // Phase 3: Calculate state root with mixed operations
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state.clone())),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -1076,7 +1103,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -1159,7 +1188,9 @@ mod tests {
         // Phase 3: Calculate state root with large dataset
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state.clone())),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -1186,7 +1217,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()
@@ -1255,7 +1288,9 @@ mod tests {
         // Phase 3: Calculate state root with storage overlay
         let state_root_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::from_unsorted(TrieInput::from_state(hashed_state.clone())),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(hashed_state.clone_into_sorted()),
+            hashed_state.construct_prefix_sets().freeze(),
         );
         let overlay_state_root =
             state_root_calc.incremental_root().expect("Failed to calculate overlay state root");
@@ -1289,7 +1324,9 @@ mod tests {
 
         let empty_overlay_calc = TrieDbOverlayStateRoot::new(
             provider.tx().expect("Failed to create RO transaction"),
-            TrieInputSorted::default(),
+            Arc::new(TrieUpdatesSorted::default()),
+            Arc::new(HashedPostStateSorted::default()),
+            TriePrefixSets::default(),
         );
         let empty_overlay_state_root = empty_overlay_calc
             .incremental_root()

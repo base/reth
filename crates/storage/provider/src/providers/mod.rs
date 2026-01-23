@@ -10,7 +10,7 @@ pub use database::*;
 mod static_file;
 pub use static_file::{
     StaticFileAccess, StaticFileJarProvider, StaticFileProvider, StaticFileProviderBuilder,
-    StaticFileProviderRW, StaticFileProviderRWRefMut, StaticFileWriter,
+    StaticFileProviderRW, StaticFileProviderRWRefMut, StaticFileWriteCtx, StaticFileWriter,
 };
 
 #[allow(missing_docs)]
@@ -20,8 +20,8 @@ pub use triedb::{TrieDbProvider, TrieDbTransaction};
 mod state;
 pub use state::{
     historical::{
-        needs_prev_shard_check, HistoricalStateProvider, HistoricalStateProviderRef, HistoryInfo,
-        LowestAvailableBlocks,
+        compute_history_rank, history_info, needs_prev_shard_check, HistoricalStateProvider,
+        HistoricalStateProviderRef, HistoryInfo, LowestAvailableBlocks,
     },
     latest::{LatestStateProvider, LatestStateProviderRef},
     overlay::{OverlayStateProvider, OverlayStateProviderFactory},
