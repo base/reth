@@ -1,4 +1,6 @@
 [files]
+# Exclude folders and files that are either managed by Git, generated as artifacts, 
+# or third-party dependencies to prevent false positives and improve scan performance.
 extend-exclude = [
     ".git",
     "target",
@@ -9,15 +11,15 @@ extend-exclude = [
 ]
 
 [default]
+# Use regular expressions to ignore specific patterns like Hex strings.
+# CAUTION: Broad hex patterns may hide accidental leaks of private keys or sensitive tokens.
 extend-ignore-re = [
-    # Hex strings of various lengths
-    "(?i)0x[0-9a-f]{8}", # 8 hex chars
-    "(?i)0x[0-9a-f]{40}", # 40 hex chars
-    "(?i)0x[0-9a-f]{64}", # 64 hex chars
-    "(?i)[0-9a-f]{8}", # 8 hex chars without 0x
-    "(?i)[0-9a-f]{40}", # 40 hex chars without 0x
-    "(?i)[0-9a-f]{64}", # 64 hex chars without 0x
-    # Ordinals in identifiers
+    # Hex strings with mandatory '0x' prefix to ensure we only ignore specific blockchain identifiers
+    "(?i)0x[0-9a-f]{8}",   # 8 hex chars (e.g., function selectors)
+    "(?i)0x[0-9a-f]{40}",  # 40 hex chars (e.g., Ethereum addresses)
+    "(?i)0x[0-9a-f]{64}",  # 64 hex chars (e.g., Transaction hashes / State roots)
+    
+    # Ordinals in identifiers (common in technical documentation and variable naming)
     "[0-9]+nd",
     "[0-9]+th",
     "[0-9]+st",
@@ -25,15 +27,15 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
-# These are valid identifiers/terms that should be allowed
+# Valid technical identifiers or project-specific terms that should not be flagged as typos.
 crate = "crate"
 ser = "ser"
 ratatui = "ratatui"
-seeked = "seeked" # Past tense of seek, used in trie iterator
-Seeked = "Seeked" # Type name in trie iterator
-Whe = "Whe" # Part of base64 encoded signature
-hel = "hel" # Part of hostname bootnode-hetzner-hel
-ONL = "ONL" # Part of base64 encoded ENR
-Iy = "Iy" # Part of base64 encoded ENR
-flate = "flate" # zlib-flate is a valid tool name
-Pn = "Pn" # Part of UPnP (Universal Plug and Play)
+seeked = "seeked" # Valid term for trie iterator state
+Seeked = "Seeked" 
+Whe = "Whe"       # Part of base64 encoded cryptographic signatures
+hel = "hel"       # Specific identifier for 'bootnode-hetzner-hel'
+ONL = "ONL"       # Identifier segment in base64 ENRs
+Iy = "Iy"         # Identifier segment in base64 ENRs
+flate = "flate"   # References the 'zlib-flate' compression tool
+Pn = "Pn"         # Standard abbreviation used in UPnP (Universal Plug and Play)
