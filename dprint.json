@@ -1,13 +1,14 @@
 {
   "toml": {
     "useTabs": false,
-    "cargo.applyConventions": false,
-    "indentWidth": 4
+    "cargo.applyConventions": true, 
+    "indentWidth": 4,
+    "lineWidth": 80
   },
   "includes": [
     "**/*.toml"
   ],
   "plugins": [
-    "https://plugins.dprint.dev/toml-0.6.4.wasm"
+    "https://plugins.dprint.dev/toml-0.6.4.wasm@88339199a0951a3192e205166258074900ec19be0e854f39281358d7265a7f7f"
   ]
 }
