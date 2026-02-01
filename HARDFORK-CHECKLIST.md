@@ -1,41 +1,34 @@
-# Non-exhaustive checklist for integrating new changes for an upcoming hard fork/devnet
+# Checklist for Integrating New Hard Fork / Devnet Changes
 
-## Introducing new EIP types or changes to primitive types
+## Introducing New EIP Types or Changes to Primitive Types
 
-- Make required changes to primitive data structures on [alloy](https://github.com/alloy-rs/alloy)
-- All new EIP data structures/constants/helpers etc. go into the `alloy-eips` crate at first.
-- New transaction types go into `alloy-consensus`
-- If there are changes to existing data structures, such as `Header` or `Block`, apply them to the types in
-  `alloy-consensus` (e.g. new `request_hashes` field in Prague)
+- [ ] Implement required changes to primitive data structures in [alloy](https://github.com/alloy-rs/alloy).
+- [ ] Ensure all new EIP data structures, constants, and helpers are first added to the `alloy-eips` crate.
+- [ ] Add new transaction types to `alloy-consensus`.
+- [ ] If existing data structures like `Header` or `Block` are modified, apply updates to `alloy-consensus` (e.g., adding the `requests_hash` field for the Prague hard fork).
+- [ ] **Security Check:** Verify that RLP/SSZ serialization for all new types is strictly tested against malleability attacks.
 
-## Engine API
+## Engine API Updates
 
-- If there are changes to the engine API (e.g. a new `engine_newPayloadVx` and `engine_getPayloadVx` pair) add the new
-  types to the `alloy-rpc-types-engine` crate.
-- If there are new parameters to the `engine_newPayloadVx` endpoint, add them to the `ExecutionPayloadSidecar` container
-  type. This types contains all additional parameters that are required to convert an `ExecutionPayload` to an EL block.
+- [ ] Add new types to the `alloy-rpc-types-engine` crate for Engine API changes (e.g., new `engine_newPayloadV3/V4` and `engine_getPayloadV3/V4` pairs).
+- [ ] If `engine_newPayloadVX` has new parameters, update the `ExecutionPayloadSidecar` container type.
+- [ ] **Validation:** Ensure `ExecutionPayloadSidecar` fields are correctly mapped to prevent node crashes during block conversion.
 
-## Reth changes
+## Reth Implementation
 
-### Updates to the engine API
+### Updates to the Engine API
+- [ ] Add new endpoints to the `EngineApi` trait and provide full implementations.
+- [ ] Update conversion logic for `ExecutionPayload` + `ExecutionPayloadSidecar` to `Block` for any new parameters.
+- [ ] Update version-specific validation logic within the `EngineValidator` trait.
 
-- Add new endpoints to the `EngineApi` trait and implement endpoints.
-- Update the `ExecutionPayload` + `ExecutionPayloadSidecar` to `Block` conversion if there are any additional
-  parameters.
-- Update version specific validation checks in the `EngineValidator` trait.
+## Op-Reth Specific Changes
 
-## Op-Reth changes
+### Updates to the Engine API
+- [ ] Op-stack follows L1 Engine API closely. For deviations (like the additional fields in Isthmus), implement dedicated server traits in `OpEngineApi`.
+- [ ] Mirror L1 versioned endpoint changes for dedicated OP types.
 
-### Updates to the engine API
-
-Opstack tries to be as close to the L1 engine API as much as possible. Isthmus (Prague equivalent) introduced the first
-deviation from the L1 engine API with an additional field in the `ExecutionPayload`. For this reason the op engine API
-has its own server traits `OpEngineApi`.
-Adding a new versioned endpoint requires the same changes as for L1 just for the dedicated OP types.
-
-### Hardforks
-
-Opstack has dedicated hardforks (e.g. Isthmus), that can be entirely opstack specific (e.g. Holocene) or can be an L1
-equivalent hardfork. Since opstack sticks to the L1 header primitive, a new L1 equivalent hardfork also requires new
-equivalent consensus checks. For this reason these `OpHardfork` must be mapped to L1 `EthereumHardfork`, for example:
-`OpHardfork::Isthmus` corresponds to `EthereumHardfork::Prague`. These mappings must be defined in the `ChainSpec`.
+### Hardfork Management
+- [ ] Map dedicated Op-stack hardforks (e.g., Holocene, Isthmus) to their L1 equivalents in the `ChainSpec`.
+- [ ] **Mapping Example:** `OpHardfork::Isthmus` must correspond to `EthereumHardfork::Prague`.
+- [ ] **Critical Security Check:** Ensure that the activation timestamp/block for `OpHardfork` is correctly synchronized with the L1 `EthereumHardfork` to prevent state root divergence and consensus splits.
+- [ ] Define these mappings explicitly within the `ChainSpec` to enforce consistency during synchronization.
