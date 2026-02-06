@@ -98,6 +98,10 @@ pub struct TransactionsManagerMetrics {
     pub(crate) propagated_transactions: Counter,
     /// Total number of reported bad transactions
     pub(crate) reported_bad_transactions: Counter,
+    /// Total number of transaction hashes broadcasted to peers
+    pub(crate) transaction_hash_forward: Counter,
+    /// Total number of full transactions broadcasted to peers
+    pub(crate) transaction_full_forward: Counter,
 
     /* -- Freq txns already marked as seen by peer -- */
     /// Total number of messages from a peer, announcing transactions that have already been

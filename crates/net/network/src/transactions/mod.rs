@@ -1073,8 +1073,10 @@ where
 
                 trace!(target: "net::tx", ?peer_id, num_txs=?new_pooled_hashes.len(), "Propagating tx hashes to peer");
 
+                let hash_count = new_pooled_hashes.len() as u64;
                 // send hashes of transactions
                 self.network.send_transactions_hashes(*peer_id, new_pooled_hashes);
+                self.metrics.transaction_hash_forward.increment(hash_count);
             }
 
             // send full transactions, if any
@@ -1091,8 +1093,10 @@ where
 
                 trace!(target: "net::tx", ?peer_id, num_txs=?new_full_transactions.len(), "Propagating full transactions to peer");
 
+                let full_count = new_full_transactions.len() as u64;
                 // send full transactions
                 self.network.send_transactions(*peer_id, new_full_transactions);
+                self.metrics.transaction_full_forward.increment(full_count);
             }
         }
 
