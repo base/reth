@@ -1077,6 +1077,7 @@ where
                 // send hashes of transactions
                 self.network.send_transactions_hashes(*peer_id, new_pooled_hashes);
                 self.metrics.transaction_hash_forward.increment(hash_count);
+                self.metrics.transaction_hash_forward_message.increment(1);
             }
 
             // send full transactions, if any
@@ -1097,6 +1098,7 @@ where
                 // send full transactions
                 self.network.send_transactions(*peer_id, new_full_transactions);
                 self.metrics.transaction_full_forward.increment(full_count);
+                self.metrics.transaction_full_forward_message.increment(1);
             }
         }
 

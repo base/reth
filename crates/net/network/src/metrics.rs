@@ -102,6 +102,10 @@ pub struct TransactionsManagerMetrics {
     pub(crate) transaction_hash_forward: Counter,
     /// Total number of full transactions broadcasted to peers
     pub(crate) transaction_full_forward: Counter,
+    /// Total number of messages sent with transaction hashes
+    pub(crate) transaction_hash_forward_message: Counter,
+    /// Total number of messages sent with full transactions
+    pub(crate) transaction_full_forward_message: Counter,
 
     /* -- Freq txns already marked as seen by peer -- */
     /// Total number of messages from a peer, announcing transactions that have already been
