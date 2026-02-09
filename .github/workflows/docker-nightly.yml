@@ -15,6 +15,9 @@ env:
   OP_DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/op-reth
   DOCKER_USERNAME: ${{ github.actor }}
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build and push
@@ -35,15 +38,20 @@ jobs:
           - name: 'Build and push the nightly profiling op-reth image'
             command: 'make IMAGE_NAME=$OP_IMAGE_NAME DOCKER_IMAGE_NAME=$OP_DOCKER_IMAGE_NAME PROFILE=profiling op-docker-build-push-nightly-profiling'
     steps:
-      - uses: actions/checkout@v5
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Remove bloatware
-        uses: laverdet/remove-bloatware@v1.0.0
+        uses: laverdet/remove-bloatware@a027d55a72759ee60f8e538ffd01f114e982fd57 # v1.0.0
         with:
           docker: true
           lang: rust
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-on-failure: true
       - name: Install cross main

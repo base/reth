@@ -7,12 +7,20 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
   release-homebrew:
     runs-on: ubuntu-latest
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
+
       - name: Update Homebrew formula
-        uses: dawidd6/action-homebrew-bump-formula@v5
+        uses: dawidd6/action-homebrew-bump-formula@3428a0601bba3173ec0bdcc945be23fa27aa4c31 # v5
         with:
           token: ${{ secrets.HOMEBREW }}
           no_fork: true
