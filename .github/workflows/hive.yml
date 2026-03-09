@@ -27,9 +27,14 @@ jobs:
     runs-on:
       group: Reth
     steps:
-      - uses: actions/checkout@v5
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Checkout hive tests
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: ethereum/hive
           path: hivetests
@@ -38,14 +43,14 @@ jobs:
         id: hive-commit
         run: echo "hash=$(cd hivetests && git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version: "^1.13.1"
       - run: go version
 
       - name: Restore hive assets cache
         id: cache-hive
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ./hive_assets
           key: hive-assets-${{ steps.hive-commit.outputs.hash }}-${{ hashFiles('.github/assets/hive/build_simulators.sh') }}
@@ -68,7 +73,7 @@ jobs:
           chmod +x hive
 
       - name: Upload hive assets
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: hive_assets
           path: ./hive_assets
@@ -184,18 +189,23 @@ jobs:
     permissions:
       issues: write
     steps:
-      - uses: actions/checkout@v5
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
 
       - name: Download hive assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: hive_assets
           path: /tmp
 
       - name: Download reth image
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: artifacts
           path: /tmp
@@ -209,7 +219,7 @@ jobs:
           chmod +x /usr/local/bin/hive
 
       - name: Checkout hive tests
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: ethereum/hive
           ref: master
@@ -250,8 +260,13 @@ jobs:
     runs-on:
       group: Reth
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
       - name: Slack Webhook Action
-        uses: rtCamp/action-slack-notify@v2
+        uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
         env:
           SLACK_COLOR: ${{ job.status }}
           SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth/actions/runs/${{ github.run_id }}"

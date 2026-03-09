@@ -18,22 +18,27 @@ jobs:
     runs-on:
       group: Reth
     steps:
-      - uses: actions/checkout@v5
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           submodules: true
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-on-failure: true
       - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a37010ded18ff788be4440302bd6830b1ae50d8b # v2.68.25
         with:
           tool: cargo-codspeed
       - name: Build the benchmark target(s)
         run: ./.github/scripts/codspeed-build.sh
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
         with:
           run: cargo codspeed run --workspace
           mode: instrumentation
