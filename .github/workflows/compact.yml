@@ -25,13 +25,18 @@ jobs:
           - cargo run --bin reth --features "dev"
           - cargo run --bin op-reth --features "dev" --manifest-path crates/optimism/bin/Cargo.toml
     steps:
-      - uses: rui314/setup-mold@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-on-failure: true
       - name: Checkout base
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ github.base_ref || 'main' }}
       # On `main` branch, generates test vectors and serializes them to disk using `Compact`.
@@ -39,7 +44,7 @@ jobs:
         run: |
           ${{ matrix.bin }} -- test-vectors compact --write
       - name: Checkout PR
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           clean: false
       # On incoming merge try to read and decode previously generated vectors with `Compact`
