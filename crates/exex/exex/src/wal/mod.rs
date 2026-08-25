@@ -23,7 +23,7 @@ use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
 use parking_lot::{RwLock, RwLockReadGuard};
 use reth_exex_types::ExExNotification;
-use reth_tracing::tracing::{debug, instrument};
+use reth_tracing::tracing::{debug, instrument, warn};
 
 /// WAL is a write-ahead log (WAL) that stores the notifications sent to ExExes.
 ///
@@ -120,7 +120,21 @@ where
         let mut notifications_size = 0;
 
         for entry in self.storage.iter_notifications(files_range) {
-            let (file_id, size, notification) = entry?;
+            // `commit` consumes the next file ID before writing, so a failed write (e.g. a full
+            // disk) leaves a permanent hole in the ID range. Aborting here would make the node
+            // unbootable until the WAL directory is deleted by hand.
+            let (file_id, size, notification) = match entry {
+                Ok(entry) => entry,
+                Err(WalError::FileNotFound(file_id)) => {
+                    warn!(
+                        target: "exex::wal",
+                        ?file_id,
+                        "Notification file is missing from the WAL, skipping"
+                    );
+                    continue
+                }
+                Err(err) => return Err(err),
+            };
 
             notifications_size += size;
 
@@ -238,12 +252,13 @@ mod tests {
     use crate::wal::{cache::CachedBlock, error::WalResult, Wal};
     use alloy_primitives::B256;
     use itertools::Itertools;
+    use reth_ethereum_primitives::EthPrimitives;
     use reth_exex_types::ExExNotification;
     use reth_provider::Chain;
     use reth_testing_utils::generators::{
         self, random_block, random_block_range, BlockParams, BlockRangeParams,
     };
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{collections::BTreeMap, fs, sync::Arc};
 
     fn read_notifications(wal: &Wal) -> WalResult<Vec<ExExNotification>> {
         wal.inner.storage.files_range()?.map_or(Ok(Vec::new()), |range| {
@@ -519,6 +534,37 @@ mod tests {
             )
         );
         assert_eq!(read_notifications(&wal)?, vec![committed_notification_2, reorged_notification]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fill_block_cache_skips_missing_notification_file() -> eyre::Result<()> {
+        reth_tracing::init_test_tracing();
+
+        let mut rng = generators::rng();
+
+        let temp_dir = tempfile::tempdir()?;
+        let wal = Wal::<EthPrimitives>::new(&temp_dir)?;
+
+        let blocks = random_block_range(&mut rng, 0..=2, BlockRangeParams::default())
+            .into_iter()
+            .map(|block| block.try_recover())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for block in &blocks {
+            wal.commit(&ExExNotification::ChainCommitted {
+                new: Arc::new(Chain::new(vec![block.clone()], Default::default(), BTreeMap::new())),
+            })?;
+        }
+
+        fs::remove_file(temp_dir.path().join("1.wal"))?;
+
+        let wal = Wal::<EthPrimitives>::new(&temp_dir)?;
+        assert_eq!(
+            wal.inner.block_cache().blocks_sorted(),
+            [(blocks[2].number, 2), (blocks[0].number, 0)]
+        );
 
         Ok(())
     }
