@@ -58,7 +58,7 @@ use crate::{
         TransactionListenerKind,
     },
     validate::{TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction},
-    AddedTransactionOutcome, AllTransactionsEvents,
+    AddedTransactionOutcome, AllTransactionsEvents, PriceBumpConfig,
 };
 use alloy_consensus::{error::ValueError, transaction::TxHashRef, BlockHeader, Signed, Typed2718};
 use alloy_eips::{
@@ -1472,6 +1472,19 @@ pub trait PoolTransaction:
         } else {
             Ok(())
         }
+    }
+
+    /// Returns whether `replacement` is underpriced relative to this transaction.
+    ///
+    /// Called on the existing transaction when another transaction would replace it.
+    /// By default, delegates to [`PriceBumpConfig::is_replacement_underpriced`].
+    /// Implementations may override this to define transaction-specific replacement semantics.
+    fn is_replacement_underpriced(
+        &self,
+        replacement: &Self,
+        price_bumps: &PriceBumpConfig,
+    ) -> bool {
+        price_bumps.is_replacement_underpriced(self, replacement)
     }
 
     /// Allows to communicate to the pool that the transaction doesn't require a nonce check.
