@@ -17,6 +17,9 @@ on:
 env:
   DOCKER_USERNAME: ${{ github.actor }}
 
+permissions:
+  contents: read
+
 jobs:
   tag-reth-latest:
     name: Tag reth as latest
@@ -26,6 +29,11 @@ jobs:
       packages: write
       contents: read
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
       - name: Log in to Docker
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${DOCKER_USERNAME} --password-stdin
