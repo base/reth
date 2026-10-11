@@ -7,6 +7,9 @@ on:
   schedule:
     - cron: "30 1 * * *"
 
+permissions:
+  contents: read
+
 jobs:
   close-issues:
     if: github.repository == 'paradigmxyz/reth'
@@ -15,7 +18,12 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/stale@v10
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
         with:
           days-before-stale: 21
           days-before-close: 7
