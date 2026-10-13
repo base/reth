@@ -68,6 +68,7 @@ impl Default for DefaultPruningValues {
     fn default() -> Self {
         Self {
             full_prune_modes: PruneModes {
+                time_based: None,
                 sender_recovery: Some(PruneMode::Full),
                 transaction_lookup: None,
                 receipts: Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE)),
@@ -79,6 +80,7 @@ impl Default for DefaultPruningValues {
             },
             full_bodies_history_use_pre_merge: true,
             minimal_prune_modes: PruneModes {
+                time_based: None,
                 sender_recovery: Some(PruneMode::Full),
                 transaction_lookup: Some(PruneMode::Full),
                 receipts: Some(PruneMode::Distance(MINIMUM_DISTANCE)),

@@ -87,6 +87,46 @@ Use `reth.toml` or individual `--prune.*` flags to configure each pruning
 segment yourself. See the [pruning configuration](/run/configuration#the-prune-section)
 reference for the TOML format.
 
+### Experimental time-based retention
+
+To retain 31 days across block-time changes, enable this opt-in policy in `reth.toml`:
+
+```toml
+[prune.segments.time_based]
+retention_seconds = 2678400
+catch_up_percent = 130
+```
+
+It replaces the block distance for **distance-configured** bodies, receipts, account history,
+and storage history. Configure those segments with `distance` modes (or use a full preset
+that does so). Disabled segments, `full`/`before` modes, transaction lookup, sender recovery,
+and log filters are unchanged. In particular, an Ethereum full preset's pre-Merge bodies
+policy is not replaced. The policy is disabled by default.
+
+On first use, each segment records its actual prune checkpoint and current chain timestamp
+in database metadata, in the same transaction as pruning. Its cutoff then advances through
+1.3 seconds of history per second of chain progress, capped at the head timestamp minus
+31 days. Existing prune runs, worker scheduling, and execution limits are unchanged. This
+is not a time or deletion budget and does not guarantee a maximum prune-run duration.
+
+- Anchors survive restarts and snapshot restores. Changing either setting re-anchors at
+  actual progress, rather than applying the new rate retroactively.
+- No checkpoint means catch-up starts at genesis. Already-deleted history cannot be restored.
+- Only blocks strictly older than the cutoff are eligible. Whole-second header timestamps,
+  static-file boundaries, ExEx progress, and unwind safety floors can retain extra history.
+- At 130%, seven days of excess history takes about 23 days of chain progress to eliminate.
+  The multiplier controls historical time, not block count, CPU usage, or database operations.
+- Backfill uses the same policy. It retains data during writes/indexing rather than skipping
+  it using the superseded distance. Catch-up can therefore temporarily require extra disk.
+- Removing this setting restores block-distance pruning and can cause a sudden catch-up run.
+  Test configuration changes on a disposable snapshot copy before using them on a live node.
+
+For snapshot trials, compare `pruner` debug logs (`head_timestamp`, `cutoff_timestamp`,
+`target_lag_seconds`) and existing per-segment duration/checkpoint metrics with persistence
+lag and disk growth. A copied snapshot must include the database metadata and prune checkpoints.
+Offline `prune` also uses this policy; repeatedly running it at an unchanged head does not
+advance a catch-up cutoff to 31 days immediately.
+
 ## Disk usage
 
 Disk usage changes as networks grow and depends on the selected node mode. For

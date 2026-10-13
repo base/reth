@@ -113,7 +113,7 @@ use reth_db::{init_db, Database};
 use reth_db_api::transaction::DbTx;
 use reth_fs_util as fs;
 use reth_node_core::args::DefaultPruningValues;
-use reth_prune_types::{PruneMode, PruneModes};
+use reth_prune_types::{PruneMode, PruneModes, PruneSegment};
 use source::{
     discover_manifest_url, fetch_manifest_from_source, fetch_snapshot_api_entries,
     print_snapshot_listing, resolve_manifest_base_url,
@@ -886,11 +886,17 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             SnapshotComponentType::State | SnapshotComponentType::Headers => {
                 return ComponentSelection::All
             }
-            SnapshotComponentType::Transactions => prune_modes.bodies_history,
+            SnapshotComponentType::Transactions => {
+                prune_modes.write_prune_mode(PruneSegment::Bodies)
+            }
             SnapshotComponentType::TransactionSenders => prune_modes.sender_recovery,
-            SnapshotComponentType::Receipts => prune_modes.receipts,
-            SnapshotComponentType::AccountChangesets => prune_modes.account_history,
-            SnapshotComponentType::StorageChangesets => prune_modes.storage_history,
+            SnapshotComponentType::Receipts => prune_modes.write_prune_mode(PruneSegment::Receipts),
+            SnapshotComponentType::AccountChangesets => {
+                prune_modes.write_prune_mode(PruneSegment::AccountHistory)
+            }
+            SnapshotComponentType::StorageChangesets => {
+                prune_modes.write_prune_mode(PruneSegment::StorageHistory)
+            }
             SnapshotComponentType::RocksdbIndices => return ComponentSelection::None,
         };
 

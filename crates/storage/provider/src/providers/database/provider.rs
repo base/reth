@@ -550,7 +550,7 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             write_storage_changesets: save_mode.with_state() &&
                 EitherWriterDestination::storage_changesets(self).is_static_file(),
             tip,
-            receipts_prune_mode: self.prune_modes.receipts,
+            receipts_prune_mode: self.prune_modes.write_prune_mode(PruneSegment::Receipts),
             // Receipts are prunable if no receipts exist in SF yet and within pruning distance
             receipts_prunable: self
                 .static_file_provider
@@ -2656,7 +2656,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             // Skip writing receipts if pruning configuration requires us to.
             if prunable_receipts &&
                 self.prune_modes
-                    .receipts
+                    .write_prune_mode(PruneSegment::Receipts)
                     .is_some_and(|mode| mode.should_prune(block_number, tip))
             {
                 continue
@@ -5114,6 +5114,31 @@ mod tests {
                 .unwrap();
             provider_rw.commit().unwrap();
         };
+
+        // Time-based retention replaces the distance during backfill too. Do not discard
+        // receipts before the pruner can apply its persisted catch-up boundary.
+        for settings in [StorageSettings::v1(), StorageSettings::v2()] {
+            for time_based in [None, Some(Default::default())] {
+                let factory = create_test_provider_factory();
+                factory.set_storage_settings_cache(settings);
+                let factory = factory.with_prune_modes(PruneModes {
+                    time_based,
+                    receipts: Some(PruneMode::Distance(100)),
+                    ..Default::default()
+                });
+                let provider_rw = factory.provider_rw().unwrap();
+                insert_blocks(&provider_rw, 200, 1);
+                provider_rw.commit().unwrap();
+                write_receipts(
+                    factory.provider_rw().unwrap().with_minimum_pruning_distance(100),
+                    0,
+                );
+                assert_eq!(
+                    factory.provider().unwrap().receipt(0).unwrap().is_some(),
+                    time_based.is_some()
+                );
+            }
+        }
 
         // Legacy mode (receipts in DB) - should be prunable
         {

@@ -2,7 +2,7 @@ use alloy_primitives::BlockNumber;
 use derive_more::Display;
 use thiserror::Error;
 
-use crate::{PruneCheckpoint, PruneMode, PruneSegment, ReceiptsLogPruneConfig};
+use crate::{PruneCheckpoint, PruneMode, PruneSegment, ReceiptsLogPruneConfig, TimeBasedPruning};
 
 /// Minimum distance from the tip necessary for the node to work correctly:
 /// 1. Minimum 2 epochs (32 blocks per epoch) required to handle any reorg according to the
@@ -46,6 +46,10 @@ pub enum HistoryType {
 #[cfg_attr(any(test, feature = "serde"), derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(any(test, feature = "serde"), serde(default))]
 pub struct PruneModes {
+    /// Optional time-based replacement for distance-pruned bodies, receipts, and history.
+    /// Disabled by default. Explicit `Full`/`Before` modes and other segments are unaffected.
+    #[cfg_attr(any(test, feature = "serde"), serde(skip_serializing_if = "Option::is_none"))]
+    pub time_based: Option<TimeBasedPruning>,
     /// Sender Recovery pruning configuration.
     #[cfg_attr(any(test, feature = "serde"), serde(skip_serializing_if = "Option::is_none"))]
     pub sender_recovery: Option<PruneMode>,
@@ -93,6 +97,7 @@ impl PruneModes {
     /// Sets pruning to all targets.
     pub fn all() -> Self {
         Self {
+            time_based: None,
             sender_recovery: Some(PruneMode::Full),
             transaction_lookup: Some(PruneMode::Full),
             receipts: Some(PruneMode::Full),
@@ -106,6 +111,23 @@ impl PruneModes {
     /// Returns whether there is any kind of receipt pruning configuration.
     pub fn has_receipts_pruning(&self) -> bool {
         self.receipts.is_some() || !self.receipts_log_filter.is_empty()
+    }
+
+    /// Returns the mode that may skip data during writes or history indexing.
+    ///
+    /// Time-based pruning must use its persisted catch-up anchor. Without that context, retain
+    /// the data and let the pruner delete it instead of applying the replaced block distance.
+    pub fn write_prune_mode(&self, segment: PruneSegment) -> Option<PruneMode> {
+        let mode = match segment {
+            PruneSegment::AccountHistory => self.account_history,
+            PruneSegment::StorageHistory => self.storage_history,
+            PruneSegment::Receipts => self.receipts,
+            PruneSegment::Bodies => self.bodies_history,
+            PruneSegment::SenderRecovery => return self.sender_recovery,
+            PruneSegment::TransactionLookup => return self.transaction_lookup,
+            _ => return None,
+        };
+        mode.filter(|mode| self.time_based.is_none() || !mode.is_distance())
     }
 
     /// Migrates deprecated prune mode values to their new defaults.
@@ -147,22 +169,30 @@ impl PruneModes {
             ),
         ] {
             if let Some(PruneMode::Distance(limit)) = prune_mode {
-                // check if distance exceeds the configured limit
-                if distance > *limit {
-                    // but only if we haven't pruned the target yet, if we don't have a checkpoint
-                    // yet, it's fully unpruned yet
-                    let pruned_height = checkpoint
-                        .and_then(|checkpoint| checkpoint.1.block_number)
-                        .unwrap_or(latest_block);
-                    if pruned_height >= target_block {
-                        // we've pruned the target block already and can't unwind past it
-                        return Err(UnwindTargetPrunedError::TargetBeyondHistoryLimit {
-                            latest_block,
-                            target_block,
-                            history_type: history_type.clone(),
-                            limit: *limit,
-                        })
-                    }
+                // A time-based cutoff can be newer than the nominal block-distance cutoff.
+                // Respect actual deletions even after the time-based policy is disabled.
+                let pruned_height = checkpoint.and_then(|cp| cp.1.block_number);
+                let use_checkpoint = self.time_based.is_some() ||
+                    pruned_height
+                        .is_some_and(|height| latest_block.saturating_sub(height) < *limit);
+                let target_pruned = pruned_height.map_or_else(
+                    // Preserve the distance policy's conservative check without a checkpoint.
+                    || self.time_based.is_none() && distance > *limit,
+                    // A checkpoint can precede a partially pruned block, so retain the
+                    // existing conservative boundary when checking actual deletions.
+                    |height| (use_checkpoint || distance > *limit) && height >= target_block,
+                );
+                if target_pruned {
+                    return Err(UnwindTargetPrunedError::TargetBeyondHistoryLimit {
+                        latest_block,
+                        target_block,
+                        history_type: history_type.clone(),
+                        limit: if self.time_based.is_some() || distance <= *limit {
+                            latest_block.saturating_sub(pruned_height.unwrap_or(latest_block))
+                        } else {
+                            *limit
+                        },
+                    })
                 }
             }
         }
@@ -248,6 +278,30 @@ mod tests {
 
     #[test]
     fn test_unwind_target_unpruned() {
+        // Time-based retention can prune inside the nominal block distance. Actual checkpoints
+        // must protect unwinds, even when that distance would normally allow the target.
+        let time_based = PruneModes {
+            time_based: Some(TimeBasedPruning::default()),
+            account_history: Some(PruneMode::Distance(13_392_000)),
+            ..Default::default()
+        };
+        let checkpoints = [(
+            PruneSegment::AccountHistory,
+            PruneCheckpoint {
+                block_number: Some(850),
+                tx_number: None,
+                prune_mode: PruneMode::Distance(13_392_000),
+            },
+        )];
+        assert!(time_based.ensure_unwind_target_unpruned(1000, 800, &checkpoints).is_err());
+        assert!(time_based.ensure_unwind_target_unpruned(1000, 850, &checkpoints).is_err());
+        assert!(time_based.ensure_unwind_target_unpruned(1000, 851, &checkpoints).is_ok());
+        assert!(time_based.ensure_unwind_target_unpruned(1000, 800, &[]).is_ok());
+        let disabled = PruneModes { time_based: None, ..time_based };
+        assert!(disabled.ensure_unwind_target_unpruned(1000, 849, &checkpoints).is_err());
+        assert!(disabled.ensure_unwind_target_unpruned(1000, 850, &checkpoints).is_err());
+        assert!(disabled.ensure_unwind_target_unpruned(1000, 851, &checkpoints).is_ok());
+
         // Test case 1: No pruning configured - should always succeed
         let prune_modes = PruneModes::default();
         assert!(prune_modes.ensure_unwind_target_unpruned(1000, 500, &[]).is_ok());

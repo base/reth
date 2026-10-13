@@ -17,6 +17,7 @@ use reth_provider::{
     ProviderError, StateWriteConfig, StateWriter, StaticFileProviderFactory, StatsReader,
     StoragePath, StorageSettingsCache, TransactionVariant,
 };
+use reth_prune_types::PruneSegment;
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::{
     BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput,
@@ -460,10 +461,10 @@ where
                 // If both account history and storage history pruning is configured, clear reverts
                 // for this block.
                 if prune_modes
-                    .account_history
+                    .write_prune_mode(PruneSegment::AccountHistory)
                     .is_some_and(|m| m.should_prune(block_number, max_block)) &&
                     prune_modes
-                        .storage_history
+                        .write_prune_mode(PruneSegment::StorageHistory)
                         .is_some_and(|m| m.should_prune(block_number, max_block))
                 {
                     reverts.clear();
