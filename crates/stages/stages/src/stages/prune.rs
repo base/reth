@@ -10,7 +10,9 @@ use reth_prune::{
 use reth_stages_api::{
     ExecInput, ExecOutput, Stage, StageCheckpoint, StageError, StageId, UnwindInput, UnwindOutput,
 };
-use reth_storage_api::{ChangeSetReader, StorageChangeSetReader, StorageSettingsCache};
+use reth_storage_api::{
+    ChangeSetReader, MetadataProvider, MetadataWriter, StorageChangeSetReader, StorageSettingsCache,
+};
 use tracing::info;
 
 /// The prune stage that runs the pruner with the provided prune modes.
@@ -50,6 +52,8 @@ where
         > + StorageSettingsCache
         + ChangeSetReader
         + StorageChangeSetReader
+        + MetadataProvider
+        + MetadataWriter
         + RocksDBProviderFactory,
 {
     fn id(&self) -> StageId {
@@ -158,6 +162,8 @@ where
         > + StorageSettingsCache
         + ChangeSetReader
         + StorageChangeSetReader
+        + MetadataProvider
+        + MetadataWriter
         + RocksDBProviderFactory,
 {
     fn id(&self) -> StageId {

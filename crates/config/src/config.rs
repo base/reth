@@ -587,6 +587,7 @@ impl PruneConfig {
             block_interval,
             segments:
                 PruneModes {
+                    time_based,
                     sender_recovery,
                     transaction_lookup,
                     receipts,
@@ -609,6 +610,7 @@ impl PruneConfig {
         }
 
         // Merge the various segment prune modes
+        self.segments.time_based = self.segments.time_based.or(time_based);
         self.segments.sender_recovery = self.segments.sender_recovery.or(sender_recovery);
         self.segments.transaction_lookup = self.segments.transaction_lookup.or(transaction_lookup);
         self.segments.receipts = self.segments.receipts.or(receipts);
@@ -1116,11 +1118,29 @@ receipts = { distance = 16384 }
     }
 
     #[test]
+    fn time_based_pruning_config_roundtrip() {
+        let config: Config = toml::from_str(
+            r#"
+            [prune.segments]
+            account_history = { distance = 13392000 }
+            [prune.segments.time_based]
+            retention_seconds = 2678400
+            catch_up_percent = 130
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.prune.segments.time_based, Some(Default::default()));
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.prune, config.prune);
+    }
+
+    #[test]
     fn test_prune_config_merge() {
         let mut config1 = PruneConfig {
             block_interval: 5,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             segments: PruneModes {
+                time_based: None,
                 sender_recovery: Some(PruneMode::Full),
                 transaction_lookup: None,
                 receipts: Some(PruneMode::Distance(1000)),
@@ -1138,6 +1158,7 @@ receipts = { distance = 16384 }
             block_interval: 10,
             minimum_pruning_distance: MINIMUM_UNWIND_SAFE_DISTANCE,
             segments: PruneModes {
+                time_based: Some(Default::default()),
                 sender_recovery: Some(PruneMode::Distance(500)),
                 transaction_lookup: Some(PruneMode::Full),
                 receipts: Some(PruneMode::Full),
@@ -1157,6 +1178,7 @@ receipts = { distance = 16384 }
         // Check that the configuration has been merged. Any configuration present in config1
         // should not be overwritten by config2
         assert_eq!(config1.block_interval, 10);
+        assert_eq!(config1.segments.time_based, Some(Default::default()));
         assert_eq!(config1.segments.sender_recovery, Some(PruneMode::Full));
         assert_eq!(config1.segments.transaction_lookup, Some(PruneMode::Full));
         assert_eq!(config1.segments.receipts, Some(PruneMode::Distance(1000)));

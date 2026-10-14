@@ -11,8 +11,11 @@ use reth_provider::{
     DBProvider, DatabaseProviderFactory, PruneCheckpointReader, PruneCheckpointWriter,
     StageCheckpointReader,
 };
-use reth_prune_types::{PruneProgress, PrunedSegmentInfo, PrunerOutput};
+use reth_prune_types::{
+    PruneProgress, PruneSegment, PrunedSegmentInfo, PrunerOutput, TimeBasedPruning,
+};
 use reth_stages_types::StageId;
+use reth_storage_api::{HeaderProvider, MetadataProvider, MetadataWriter};
 use reth_tokio_util::{EventSender, EventStream};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -47,6 +50,8 @@ pub struct Pruner<Provider, PF> {
     /// Optional override for the minimum pruning distance. When set, this replaces the
     /// per-segment hardcoded minimums (e.g. `MINIMUM_UNWIND_SAFE_DISTANCE`).
     minimum_pruning_distance: Option<u64>,
+    /// Optional time-based replacement for user history distance modes.
+    time_based: Option<TimeBasedPruning>,
     /// The finished height of all `ExEx`'s.
     finished_exex_height: watch::Receiver<FinishedExExHeight>,
     #[doc(hidden)]
@@ -71,6 +76,7 @@ impl<Provider> Pruner<Provider, ()> {
             delete_limit,
             timeout,
             minimum_pruning_distance: None,
+            time_based: None,
             finished_exex_height,
             metrics: Metrics::default(),
             event_sender: Default::default(),
@@ -99,6 +105,7 @@ where
             delete_limit,
             timeout,
             minimum_pruning_distance: None,
+            time_based: None,
             finished_exex_height,
             metrics: Metrics::default(),
             event_sender: Default::default(),
@@ -107,6 +114,12 @@ where
 }
 
 impl<Provider, S> Pruner<Provider, S> {
+    /// Sets the time-based retention policy without changing pruning execution limits.
+    pub const fn with_time_based(mut self, policy: Option<TimeBasedPruning>) -> Self {
+        self.time_based = policy;
+        self
+    }
+
     /// Sets the minimum pruning distance, overriding per-segment hardcoded minimums.
     pub const fn with_minimum_pruning_distance(mut self, distance: u64) -> Self {
         self.minimum_pruning_distance = Some(distance);
@@ -116,7 +129,12 @@ impl<Provider, S> Pruner<Provider, S> {
 
 impl<Provider, S> Pruner<Provider, S>
 where
-    Provider: PruneCheckpointReader + PruneCheckpointWriter + StageCheckpointReader,
+    Provider: PruneCheckpointReader
+        + PruneCheckpointWriter
+        + StageCheckpointReader
+        + HeaderProvider
+        + MetadataProvider
+        + MetadataWriter,
 {
     /// Listen for events on the pruner.
     pub fn events(&self) -> EventStream<PrunerEvent> {
@@ -139,6 +157,13 @@ where
         provider: &Provider,
         tip_block_number: BlockNumber,
     ) -> PrunerResult {
+        if let Some(policy) = self.time_based &&
+            (policy.retention_seconds == 0 || policy.catch_up_percent < 100)
+        {
+            return Err(PrunerError::InconsistentData(
+                "time-based pruning requires positive retention_seconds and catch_up_percent >= 100",
+            ))
+        }
         let Some(tip_block_number) =
             self.adjust_tip_block_number_to_finished_exex_height(tip_block_number)
         else {
@@ -203,32 +228,51 @@ where
                 break
             }
 
+            // Do not initialize time-based anchors until the segment can actually run.
+            if let Some(required_stage) = segment.required_stage() &&
+                !is_stage_finished(provider, required_stage)?
+            {
+                debug!(target: "pruner", segment = ?segment.segment(), ?required_stage,
+                    "Segment's required stage not finished, skipping");
+                continue
+            }
+            let previous_checkpoint = provider.get_prune_checkpoint(segment.segment())?;
             if let Some((to_block, prune_mode)) = segment
                 .mode()
                 .map(|mode| {
+                    if let Some(policy) = self.time_based &&
+                        mode.is_distance() &&
+                        segment.purpose().is_user() &&
+                        matches!(
+                            segment.segment(),
+                            PruneSegment::Bodies |
+                                PruneSegment::Receipts |
+                                PruneSegment::AccountHistory |
+                                PruneSegment::StorageHistory
+                        )
+                    {
+                        return crate::time_based::prune_target(
+                            provider,
+                            policy,
+                            segment.segment(),
+                            tip_block_number,
+                            previous_checkpoint,
+                            self.minimum_pruning_distance
+                                .unwrap_or_else(|| segment.segment().min_blocks()),
+                        )
+                        .map(|target| target.map(|block| (block, mode)))
+                    }
                     mode.prune_target_block_with_min(
                         tip_block_number,
                         segment.segment(),
                         segment.purpose(),
                         self.minimum_pruning_distance,
                     )
+                    .map_err(PrunerError::from)
                 })
                 .transpose()?
                 .flatten()
             {
-                // Check if segment has a required stage that must be finished first
-                if let Some(required_stage) = segment.required_stage() &&
-                    !is_stage_finished(provider, required_stage)?
-                {
-                    debug!(
-                        target: "pruner",
-                        segment = ?segment.segment(),
-                        ?required_stage,
-                        "Segment's required stage not finished, skipping"
-                    );
-                    continue
-                }
-
                 debug!(
                     target: "pruner",
                     segment = ?segment.segment(),
@@ -239,7 +283,6 @@ where
                 );
 
                 let segment_start = Instant::now();
-                let previous_checkpoint = provider.get_prune_checkpoint(segment.segment())?;
                 let segment_output = segment.prune(
                     provider,
                     PruneInput { previous_checkpoint, to_block, limiter: limiter.clone() },
@@ -348,7 +391,12 @@ where
 impl<PF> Pruner<PF::ProviderRW, PF>
 where
     PF: DatabaseProviderFactory<
-        ProviderRW: PruneCheckpointWriter + PruneCheckpointReader + StageCheckpointReader,
+        ProviderRW: PruneCheckpointWriter
+                        + PruneCheckpointReader
+                        + StageCheckpointReader
+                        + HeaderProvider
+                        + MetadataProvider
+                        + MetadataWriter,
     >,
 {
     /// Run the pruner. This will only prune data up to the highest finished ExEx height, if there
@@ -380,9 +428,159 @@ fn is_stage_finished<Provider: StageCheckpointReader>(
 
 #[cfg(test)]
 mod tests {
-    use crate::Pruner;
+    use crate::{Pruner, PrunerBuilder};
+    use alloy_consensus::Header;
+    use alloy_primitives::Address;
+    use reth_config::PruneConfig;
+    use reth_db_api::{models::StorageSettings, tables};
     use reth_exex_types::FinishedExExHeight;
-    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_primitives_traits::{Account, SealedHeader, StorageEntry};
+    use reth_provider::{test_utils::create_test_provider_factory, PruneCheckpointReader};
+    use reth_prune_types::{PruneMode, PruneModes, PruneSegment, TimeBasedPruning};
+    use reth_stages::test_utils::TestStageDB;
+    use reth_storage_api::StorageSettingsCache;
+
+    #[test]
+    fn time_based_catch_up_across_block_time_change_and_restart() {
+        let db = TestStageDB::default();
+        db.factory.set_storage_settings_cache(StorageSettings::v1());
+        let headers = (0..=700)
+            .map(|number| {
+                SealedHeader::seal_slow(Header {
+                    number,
+                    timestamp: if number <= 100 { number * 2 } else { 200 + (number - 100) / 5 },
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        db.insert_headers(&headers).unwrap();
+        let changesets = (0..=700)
+            .map(|_| vec![(Address::ZERO, Account::default(), vec![StorageEntry::default()])])
+            .collect::<Vec<_>>();
+        db.insert_changesets(changesets.clone(), None).unwrap();
+        db.insert_history(changesets, None).unwrap();
+
+        // Establish different actual checkpoints with the original block-distance policy.
+        let mut config = PruneConfig {
+            minimum_pruning_distance: 5,
+            segments: PruneModes {
+                account_history: Some(PruneMode::Distance(100)),
+                storage_history: Some(PruneMode::Distance(110)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        PrunerBuilder::new(config.clone())
+            .build_with_provider_factory(db.factory.clone())
+            .run(150)
+            .unwrap();
+
+        // The nominal distance would retain everything in this small chain. Time retention
+        // must replace it, without jumping either segment straight to the desired cutoff.
+        config.segments.account_history = Some(PruneMode::Distance(13_392_000));
+        config.segments.storage_history = Some(PruneMode::Distance(13_392_000));
+        config.segments.time_based =
+            Some(TimeBasedPruning { retention_seconds: 100, catch_up_percent: 130 });
+        let (exex_tx, exex_rx) = tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+
+        // An interrupted first run must not leave an anchor ahead of committed progress.
+        {
+            let provider = db.factory.provider_rw().unwrap();
+            PrunerBuilder::new(config.clone())
+                .build_with_provider_factory(db.factory.clone())
+                .run_with_provider(&provider, 100)
+                .unwrap();
+            // Dropping the provider aborts this transaction, including anchor initialization.
+        }
+
+        // At head timestamp 220, the cutoffs are 113 and 93: six old blocks per segment,
+        // not fifty. Later, both converge to 100 seconds and cross into repeated timestamps.
+        for (tip, account_cutoff, storage_cutoff) in
+            [(150, 50, 40), (200, 56, 46), (350, 74, 65), (650, 149, 149), (700, 199, 199)]
+        {
+            // Recreate the pruner every time; catch-up must survive process restarts.
+            let mut pruner = PrunerBuilder::new(config.clone())
+                .finished_exex_height(exex_rx.clone())
+                .build_with_provider_factory(db.factory.clone());
+            pruner.run(tip).unwrap();
+            let provider = db.factory.provider().unwrap();
+            for (segment, cutoff) in [
+                (PruneSegment::AccountHistory, account_cutoff),
+                (PruneSegment::StorageHistory, storage_cutoff),
+            ] {
+                assert_eq!(
+                    provider.get_prune_checkpoint(segment).unwrap().unwrap().block_number,
+                    Some(cutoff)
+                );
+            }
+            assert_eq!(
+                db.table::<tables::AccountChangeSets>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|(block, _)| block)
+                    .collect::<Vec<_>>(),
+                ((account_cutoff + 1)..=700).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                db.table::<tables::StorageChangeSets>()
+                    .unwrap()
+                    .into_iter()
+                    .map(|(key, _)| key.block_number())
+                    .collect::<Vec<_>>(),
+                ((storage_cutoff + 1)..=700).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                db.table::<tables::AccountsHistory>().unwrap()[0].1.iter().collect::<Vec<_>>(),
+                ((account_cutoff + 1)..=700).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                db.table::<tables::StoragesHistory>().unwrap()[0].1.iter().collect::<Vec<_>>(),
+                ((storage_cutoff + 1)..=700).collect::<Vec<_>>()
+            );
+        }
+
+        // A shorter window and faster multiplier must re-anchor, not accelerate retroactively.
+        config.segments.time_based =
+            Some(TimeBasedPruning { retention_seconds: 50, catch_up_percent: 200 });
+        let mut pruner =
+            PrunerBuilder::new(config.clone()).build_with_provider_factory(db.factory.clone());
+        pruner.run(700).unwrap();
+        assert_eq!(db.table::<tables::AccountChangeSets>().unwrap()[0].0, 200);
+
+        // A lower head (unwind) or lagging ExEx cannot advance pruning.
+        pruner.run(650).unwrap();
+        exex_tx.send(FinishedExExHeight::Height(650)).unwrap();
+        let mut pruner = PrunerBuilder::new(config.clone())
+            .finished_exex_height(exex_rx)
+            .build_with_provider_factory(db.factory.clone());
+        pruner.run(700).unwrap();
+        assert_eq!(db.table::<tables::AccountChangeSets>().unwrap()[0].0, 200);
+
+        // Time-based eligibility still cannot cross the configured block safety floor.
+        let headers = (701..=750)
+            .map(|number| {
+                SealedHeader::seal_slow(Header {
+                    number,
+                    timestamp: 200 + (number - 100) / 5,
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        db.insert_headers(&headers).unwrap();
+        config.minimum_pruning_distance = 530;
+        PrunerBuilder::new(config.clone())
+            .build_with_provider_factory(db.factory.clone())
+            .run(750)
+            .unwrap();
+        assert_eq!(db.table::<tables::AccountChangeSets>().unwrap()[0].0, 221);
+
+        config.segments.time_based.as_mut().unwrap().retention_seconds = 0;
+        assert!(PrunerBuilder::new(config)
+            .build_with_provider_factory(db.factory.clone())
+            .run(750)
+            .is_err());
+        assert_eq!(db.table::<tables::AccountChangeSets>().unwrap()[0].0, 221);
+    }
 
     #[test]
     fn is_pruning_needed() {

@@ -33,6 +33,7 @@ use reth_provider::{
     providers::BlockchainProvider, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
     StageCheckpointReader, StageCheckpointWriter,
 };
+use reth_prune_types::PruneSegment;
 use reth_stages::{
     stages::{
         AccountHashingStage, BodyStage, ExecutionStage, HeaderStage, IndexAccountHistoryStage,
@@ -314,7 +315,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     Box::new(IndexAccountHistoryStage::new(
                         config.stages.index_account_history,
                         etl_config,
-                        prune_modes.account_history,
+                        prune_modes.write_prune_mode(PruneSegment::AccountHistory),
                     )),
                     None,
                 ),
@@ -322,7 +323,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     Box::new(IndexStorageHistoryStage::new(
                         config.stages.index_storage_history,
                         etl_config,
-                        prune_modes.storage_history,
+                        prune_modes.write_prune_mode(PruneSegment::StorageHistory),
                     )),
                     None,
                 ),

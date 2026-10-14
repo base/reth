@@ -52,7 +52,7 @@ use reth_evm::ConfigureEvm;
 use reth_network_p2p::{bodies::downloader::BodyDownloader, headers::downloader::HeaderDownloader};
 use reth_primitives_traits::{Block, NodePrimitives};
 use reth_provider::HeaderSyncGapProvider;
-use reth_prune_types::{PruneMode, PruneModes};
+use reth_prune_types::{PruneMode, PruneModes, PruneSegment};
 use reth_stages_api::Stage;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -468,12 +468,12 @@ where
             .add_stage(IndexStorageHistoryStage::new(
                 self.stages_config.index_storage_history,
                 self.stages_config.etl.clone(),
-                self.prune_modes.storage_history,
+                self.prune_modes.write_prune_mode(PruneSegment::StorageHistory),
             ))
             .add_stage(IndexAccountHistoryStage::new(
                 self.stages_config.index_account_history,
                 self.stages_config.etl.clone(),
-                self.prune_modes.account_history,
+                self.prune_modes.write_prune_mode(PruneSegment::AccountHistory),
             ))
     }
 }

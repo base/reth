@@ -16,6 +16,7 @@ mod limiter;
 mod metrics;
 mod pruner;
 pub mod segments;
+mod time_based;
 
 use crate::metrics::Metrics;
 pub use builder::PrunerBuilder;

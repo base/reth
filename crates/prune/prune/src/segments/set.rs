@@ -72,6 +72,7 @@ where
             storage_history,
             bodies_history,
             receipts_log_filter,
+            ..
         } = prune_modes;
 
         Self::default()

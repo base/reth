@@ -17,6 +17,8 @@ mod mode;
 mod pruner;
 mod segment;
 mod target;
+mod time_based;
+pub use time_based::TimeBasedPruning;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use alloy_primitives::{Address, BlockNumber};
