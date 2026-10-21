@@ -88,9 +88,10 @@ impl<T: ShardedHistoryTable> PreparedHistoryShardWrites<T> {
 
 /// Prepares history shard writes, reading last shards in parallel.
 ///
-/// `get_last` must read **committed** state only (for example [`RocksDBProvider::get`]). Join all
-/// reads before opening a `RocksDB` write batch: gets do not see pending puts, and parallel gets
-/// must not overlap auto-commit `write_opt`.
+/// `get_last` must read **committed** state only (for example
+/// [`RocksDBProvider::get`](crate::providers::RocksDBProvider::get)). Join all reads before opening
+/// a `RocksDB` write batch: gets do not see pending puts, and parallel gets must not overlap
+/// auto-commit `write_opt`.
 pub fn prepare_history_shard_writes_parallel<T, F>(
     grouped: BTreeMap<T::PartialKey, Vec<BlockNumber>>,
     get_last: F,
