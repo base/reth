@@ -150,7 +150,7 @@ where
             Some(self.overlay_builder.clone()),
             Arc::clone(&self.state_trie_overlay_cache),
             self.metrics.clone(),
-            self.proof_cursor_metrics.clone(),
+            Some(self.proof_cursor_metrics.clone()),
             self.known_storage_roots.clone(),
             is_v2,
         ))
@@ -174,7 +174,9 @@ where
     overlay_builder: Option<OverlayBuilder<N>>,
     state_trie_overlay_cache: StateTrieOverlayCache,
     metrics: OverlayStateProviderFactoryMetrics,
-    proof_cursor_metrics: ProofCursorMetrics,
+    /// Cursor metric handles for multiproof calculators. Providers built outside a factory
+    /// register them on their first multiproof, so opening a provider stays cheap.
+    proof_cursor_metrics: Option<ProofCursorMetrics>,
     /// Revealed storage roots from the reused sparse trie, shared across proof workers.
     known_storage_roots: Arc<B256Map<B256>>,
     state_trie_overlay: OnceCell<StateTrieOverlay>,
@@ -274,7 +276,7 @@ where
         overlay_builder: Option<OverlayBuilder<N>>,
         state_trie_overlay_cache: StateTrieOverlayCache,
         metrics: OverlayStateProviderFactoryMetrics,
-        proof_cursor_metrics: ProofCursorMetrics,
+        proof_cursor_metrics: Option<ProofCursorMetrics>,
         known_storage_roots: Arc<B256Map<B256>>,
         is_v2: bool,
     ) -> Self {
@@ -793,7 +795,7 @@ where
                         self.provider().tx(),
                         input,
                         self.is_v2,
-                        self.proof_cursor_metrics.clone(),
+                        self.proof_cursor_metrics.clone().unwrap_or_default(),
                         self.known_storage_roots.clone(),
                     )
                 };
