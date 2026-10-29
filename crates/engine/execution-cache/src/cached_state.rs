@@ -28,7 +28,7 @@ use std::{
     },
     time::Duration,
 };
-use tracing::{debug_span, instrument, trace, warn};
+use tracing::{debug, debug_span, instrument, trace, warn};
 
 /// Alignment in bytes for entries in the fixed-cache.
 ///
@@ -1067,8 +1067,12 @@ impl<S: HashedPostStateProvider> HashedPostStateProvider for CachedStateProvider
 ///
 /// ## Storage Invalidation
 ///
-/// Since EIP-6780, SELFDESTRUCT only works within the same transaction where the
-/// contract was created, so we don't need to handle clearing the storage.
+/// The storage cache is keyed by `(address, slot)` and cannot evict a single account's
+/// storage, so destroying an account that existed at block start clears the whole cache. Since
+/// EIP-6780 this cannot happen through SELFDESTRUCT, but an existing account can still be
+/// destroyed by EIP-161 once it is empty. A codeless account is not guaranteed to be
+/// storage-free: EIP-8130 lets a nonce-zero account write storage while delegated and then
+/// clear its delegation.
 #[derive(Debug, Clone)]
 pub struct ExecutionCache(Arc<ExecutionCacheInner>);
 
@@ -1269,31 +1273,40 @@ impl ExecutionCache {
                 continue
             }
 
-            // If the original account had code (was a contract), we must clear the entire cache
-            // because we can't efficiently invalidate all storage slots for a single address.
-            // This should only happen on pre-Dencun networks.
+            // If the account existed at block start, its pre-block storage was wiped. We must
+            // clear the entire cache because we can't efficiently invalidate all storage slots for
+            // a single address, and a codeless account may still have held storage.
             //
-            // If the original account had no code (was an EOA or a not yet deployed contract), we
-            // just remove the account from cache - no storage exists for it.
+            // If the account did not exist at block start, no storage from before this block can
+            // be cached for it. A destroyed account is removed from the cache; a re-created
+            // account still has post-block storage and info that must be written below.
             if account.was_destroyed() {
-                let had_code =
-                    account.original_info.as_ref().is_some_and(|info| !info.is_empty_code_hash());
-                if had_code {
-                    self.0.selfdestruct_encountered.call_once(|| {
-                        warn!(
+                if let Some(original_info) = &account.original_info {
+                    if original_info.is_empty_code_hash() {
+                        debug!(
                             target: "engine::caching",
                             address = ?addr,
-                            info = ?account.info,
-                            original_info = ?account.original_info,
-                            "Encountered an inter-transaction SELFDESTRUCT that reset the storage cache. Are you running a pre-Dencun network?"
+                            "Existing codeless account destroyed, resetting the storage cache"
                         );
-                    });
+                    } else {
+                        self.0.selfdestruct_encountered.call_once(|| {
+                            warn!(
+                                target: "engine::caching",
+                                address = ?addr,
+                                info = ?account.info,
+                                original_info = ?account.original_info,
+                                "Encountered an inter-transaction SELFDESTRUCT that reset the storage cache. Are you running a pre-Dencun network?"
+                            );
+                        });
+                    }
                     self.clear();
                     return Ok(())
                 }
 
-                self.0.account_cache.remove(addr);
-                continue;
+                if account.info.is_none() {
+                    self.0.account_cache.remove(addr);
+                    continue;
+                }
             }
 
             // If we have an account that was modified, but it has a `None` account info, some wild
@@ -1414,7 +1427,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{map::HashMap, U256};
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-    use reth_revm::db::{AccountStatus, BundleAccount};
+    use reth_revm::db::{states::StorageSlot, AccountStatus, BundleAccount};
     use revm::state::AccountInfo;
 
     #[test]
@@ -1571,48 +1584,124 @@ mod tests {
         assert!(caches.0.storage_cache.get(&(addr1, storage_key)).is_none());
     }
 
+    /// A codeless account can hold storage (EIP-8130 lets a nonce-zero account write storage while
+    /// delegated, then clear the delegation). Destroying it under EIP-161 wipes that storage, so
+    /// the cache must not keep serving the pre-block values.
     #[test]
-    fn test_insert_state_destroyed_account_without_code_removes_only_account() {
+    fn test_insert_state_destroyed_existing_codeless_account_drops_its_storage() {
         let caches = ExecutionCache::new(1000);
-
-        // Pre-populate caches with some data
-        let addr1 = Address::random();
-        let addr2 = Address::random();
-        let storage_key = StorageKey::random();
-        caches.insert_account(addr1, Some(Account::default()));
-        caches.insert_account(addr2, Some(Account::default()));
-        caches.insert_storage(addr1, storage_key, Some(U256::from(42)));
+        let addr = Address::random();
+        let key = StorageKey::from(U256::from(1));
+        caches
+            .insert_account(addr, Some(Account { balance: U256::from(100), ..Default::default() }));
+        caches.insert_storage(addr, key, Some(U256::from(7)));
 
         let bundle = BundleState {
-            // BundleState with a destroyed EOA (no code)
             state: HashMap::from_iter([(
-                addr1,
+                addr,
                 BundleAccount::new(
                     Some(AccountInfo {
                         balance: U256::from(100),
-                        nonce: 1,
-                        code_hash: alloy_primitives::KECCAK256_EMPTY, // Empty code hash = EOA
-                        code: None,
-                        account_id: None,
+                        code_hash: alloy_primitives::KECCAK256_EMPTY,
+                        ..Default::default()
                     }),
-                    None, // Destroyed
+                    None,
                     Default::default(),
                     AccountStatus::Destroyed,
                 ),
             )]),
-            contracts: Default::default(),
-            reverts: Default::default(),
-            state_size: 0,
-            reverts_size: 0,
+            ..Default::default()
         };
-
-        // Insert state should only remove the destroyed account
         assert!(caches.insert_state(&bundle).is_ok());
 
-        // Verify only addr1 was removed, other data is still present
-        assert!(caches.0.account_cache.get(&addr1).is_none());
-        assert!(caches.0.account_cache.get(&addr2).is_some());
-        assert!(caches.0.storage_cache.get(&(addr1, storage_key)).is_some());
+        // Re-funded in a later block, the account exists again with no storage.
+        let provider = MockEthProvider::default();
+        provider.extend_accounts(vec![(addr, ExtendedAccount::new(0, U256::from(1)))]);
+        let state_provider = CachedStateProvider::new(provider, caches, None);
+        assert_eq!(state_provider.storage(addr, key).unwrap(), None);
+    }
+
+    /// The EIP-8130 recipe for the re-created case: an existing funded codeless account is drained
+    /// (EIP-161 destroy) and then delegated and written in the same block. Prewarm executed the
+    /// write alone against parent state and cached a zero for the slot.
+    #[test]
+    fn test_insert_state_recreated_existing_account_drops_prewarmed_storage() {
+        let caches = ExecutionCache::new(1000);
+        let addr = Address::random();
+        let key = StorageKey::from(U256::from(1));
+        let provider = MockEthProvider::default();
+        provider.extend_accounts(vec![(addr, ExtendedAccount::new(0, U256::from(100)))]);
+        let prewarm = CachedStateProvider::new_prewarm(provider, caches.clone());
+        assert_eq!(prewarm.storage(addr, key).unwrap(), None);
+        assert_eq!(caches.0.storage_cache.get(&(addr, key)), Some(U256::ZERO));
+        drop(prewarm);
+
+        let current_info = AccountInfo { code_hash: B256::random(), ..Default::default() };
+        let bundle = BundleState {
+            state: HashMap::from_iter([(
+                addr,
+                BundleAccount::new(
+                    Some(AccountInfo {
+                        balance: U256::from(100),
+                        code_hash: alloy_primitives::KECCAK256_EMPTY,
+                        ..Default::default()
+                    }),
+                    Some(current_info),
+                    HashMap::from_iter([(
+                        U256::from(1),
+                        StorageSlot::new_changed(U256::ZERO, U256::from(7)),
+                    )]),
+                    AccountStatus::DestroyedChanged,
+                ),
+            )]),
+            ..Default::default()
+        };
+        assert!(caches.insert_state(&bundle).is_ok());
+
+        let provider = MockEthProvider::default();
+        provider.extend_accounts(vec![(
+            addr,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage(vec![(key, U256::from(7))]),
+        )]);
+        let state_provider = CachedStateProvider::new(provider, caches, None);
+        assert_eq!(state_provider.storage(addr, key).unwrap(), Some(U256::from(7)));
+    }
+
+    /// An account created, destroyed, and re-created within one block has no pre-block storage,
+    /// so the cache keeps everything else and writes the account's post-block storage and info.
+    #[test]
+    fn test_insert_state_recreated_new_account_updates_cached_storage() {
+        let caches = ExecutionCache::new(1000);
+        let addr = Address::random();
+        let other_addr = Address::random();
+        let key = StorageKey::from(U256::from(1));
+        let other_key = StorageKey::from(U256::from(2));
+        caches.insert_storage(addr, key, Some(U256::ZERO));
+        caches.insert_storage(other_addr, other_key, Some(U256::from(42)));
+
+        let current_info =
+            AccountInfo { nonce: 1, code_hash: B256::random(), ..Default::default() };
+        let bundle = BundleState {
+            state: HashMap::from_iter([(
+                addr,
+                BundleAccount::new(
+                    None,
+                    Some(current_info.clone()),
+                    HashMap::from_iter([(
+                        U256::from(1),
+                        StorageSlot::new_changed(U256::ZERO, U256::from(7)),
+                    )]),
+                    AccountStatus::DestroyedChanged,
+                ),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(caches.insert_state(&bundle).is_ok());
+        assert_eq!(caches.0.storage_cache.get(&(addr, key)), Some(U256::from(7)));
+        let cached_account = caches.0.account_cache.get(&addr).flatten().unwrap();
+        assert_eq!(cached_account.bytecode_hash, Some(current_info.code_hash));
+        assert_eq!(caches.0.storage_cache.get(&(other_addr, other_key)), Some(U256::from(42)));
     }
 
     #[test]
