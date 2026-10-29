@@ -8,7 +8,7 @@ use crate::{
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
 };
-use imbl::OrdMap;
+use imbl::{OrdMap, OrdSet};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cmp::Ordering, collections::hash_map::Entry, ops::Bound::Unbounded, sync::Arc};
 use tokio::sync::broadcast;
@@ -39,6 +39,11 @@ pub struct PendingPool<T: TransactionOrdering> {
     /// Independent transactions that can be included directly and don't require other
     /// transactions.
     independent_transactions: FxHashMap<SenderId, PendingTransaction<T>>,
+    /// The `independent_transactions` ordered by priority.
+    ///
+    /// Kept alongside the per-sender map so that [`Self::best`] hands out a structurally shared
+    /// snapshot instead of collecting and sorting the independent transaction of every sender.
+    independent_by_priority: OrdSet<IndependentKey<T::PriorityValue>>,
     /// Keeps track of the size of this pool.
     ///
     /// See also [`reth_primitives_traits::InMemorySize::size`].
@@ -64,6 +69,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
             submission_id: 0,
             by_id: Default::default(),
             independent_transactions: Default::default(),
+            independent_by_priority: Default::default(),
             highest_nonces: Default::default(),
             size_of: Default::default(),
             new_transaction_notifier,
@@ -78,6 +84,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     /// Returns all transactions by id.
     fn clear_transactions(&mut self) -> OrdMap<TransactionId, PendingTransaction<T>> {
         self.independent_transactions.clear();
+        self.independent_by_priority = OrdSet::new();
         self.highest_nonces.clear();
         self.size_of.reset();
         std::mem::take(&mut self.by_id)
@@ -104,7 +111,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
     pub fn best(&self) -> BestTransactions<T> {
         BestTransactions {
             all: self.by_id.clone(),
-            independent: self.independent_transactions.values().cloned().collect(),
+            independent: self.independent_by_priority.clone(),
             invalid: Default::default(),
             new_transaction_receiver: Some(self.new_transaction_notifier.subscribe()),
             last_priority: None,
@@ -145,7 +152,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
             let tx_id = *tx.id();
             let transaction = PendingTransaction { submission_id, transaction: tx, priority };
             if best.ancestor(&tx_id).is_none() {
-                best.independent.insert(transaction.clone());
+                best.independent.insert(transaction.independent_key());
             }
             best.all.insert(tx_id, transaction);
         }
@@ -200,7 +207,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 self.size_of += tx.transaction.size();
                 if highest.is_none() {
                     // first kept transaction of this sender, hence the independent one
-                    self.independent_transactions.insert(id.sender, tx.clone());
+                    self.set_independent(id.sender, tx.clone());
                 }
                 highest = Some(id);
                 self.by_id.insert(id, tx);
@@ -253,7 +260,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 self.size_of += tx.transaction.size();
                 if highest.is_none() {
                     // first kept transaction of this sender, hence the independent one
-                    self.independent_transactions.insert(id.sender, tx.clone());
+                    self.set_independent(id.sender, tx.clone());
                 }
                 highest = Some(id);
                 self.by_id.insert(id, tx);
@@ -297,16 +304,22 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 entry.insert(tx.clone());
             }
         }
-        match self.independent_transactions.entry(tx.transaction.sender_id()) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().transaction.nonce() > tx.transaction.nonce() {
-                    *entry.get_mut() = tx.clone();
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(tx.clone());
-            }
+        let sender = tx.transaction.sender_id();
+        if self
+            .independent_transactions
+            .get(&sender)
+            .is_none_or(|independent| independent.transaction.nonce() > tx.transaction.nonce())
+        {
+            self.set_independent(sender, tx.clone());
         }
+    }
+
+    /// Tracks `tx` as the independent transaction of `sender`, replacing any previous one.
+    fn set_independent(&mut self, sender: SenderId, tx: PendingTransaction<T>) {
+        if let Some(previous) = self.independent_transactions.insert(sender, tx.clone()) {
+            self.independent_by_priority.remove(&previous.independent_key());
+        }
+        self.independent_by_priority.insert(tx.independent_key());
     }
 
     /// Adds a new transactions to the pending queue.
@@ -355,10 +368,12 @@ impl<T: TransactionOrdering> PendingPool<T> {
         if let Some(lowest) = self.independent_transactions.get(&id.sender) &&
             lowest.transaction.nonce() == id.nonce
         {
-            self.independent_transactions.remove(&id.sender);
+            if let Some(removed) = self.independent_transactions.remove(&id.sender) {
+                self.independent_by_priority.remove(&removed.independent_key());
+            }
             // mark the next as independent if it exists
             if let Some(unlocked) = self.get(&id.descendant()) {
-                self.independent_transactions.insert(id.sender, unlocked.clone());
+                self.set_independent(id.sender, unlocked.clone());
             }
         }
 
@@ -668,6 +683,10 @@ impl<T: TransactionOrdering> PendingPool<T> {
                 independent, lowest,
                 "independent transaction of {sender:?} does not match its lowest nonce pool entry"
             );
+            assert!(
+                self.independent_by_priority.contains(&independent.independent_key()),
+                "independent transaction of {sender:?} is missing from the priority order"
+            );
             let tracked_highest = self
                 .highest_nonces
                 .get(&sender)
@@ -682,6 +701,11 @@ impl<T: TransactionOrdering> PendingPool<T> {
             self.independent_transactions.len(),
             senders,
             "independent_transactions tracks senders without transactions"
+        );
+        assert_eq!(
+            self.independent_by_priority.len(),
+            senders,
+            "independent_by_priority tracks transactions outside the pool"
         );
         assert_eq!(
             self.highest_nonces.len(),
@@ -711,6 +735,47 @@ impl<T: TransactionOrdering> PendingTransaction<T> {
     /// The next transaction of the sender: `nonce + 1`
     pub fn unlocks(&self) -> TransactionId {
         self.transaction.transaction_id.descendant()
+    }
+
+    /// Returns the position of this transaction in a priority ordered set.
+    pub(crate) fn independent_key(&self) -> IndependentKey<T::PriorityValue> {
+        IndependentKey {
+            priority: self.priority.clone(),
+            submission_id: self.submission_id,
+            id: *self.transaction.id(),
+        }
+    }
+}
+
+/// The position of a [`PendingTransaction`] in a priority ordered set, without a reference to the
+/// transaction itself.
+///
+/// Orders exactly like [`PendingTransaction`]. Holding no reference keeps copies of shared set
+/// nodes free of reference count updates; the transaction is looked up by `id` when needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndependentKey<V: Ord + Clone> {
+    /// The priority value assigned by the used `Ordering` function.
+    pub(crate) priority: Priority<V>,
+    /// Identifier that tags when the transaction was submitted in the pool.
+    pub(crate) submission_id: u64,
+    /// Identifier of the transaction.
+    pub(crate) id: TransactionId,
+}
+
+impl<V: Ord + Clone> PartialOrd for IndependentKey<V> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<V: Ord + Clone> Ord for IndependentKey<V> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Same order as `PendingTransaction`: the submission id is unique per transaction, so the
+        // id only keeps the order total.
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.submission_id.cmp(&self.submission_id))
+            .then_with(|| self.id.cmp(&other.id))
     }
 }
 
