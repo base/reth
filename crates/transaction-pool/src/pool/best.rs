@@ -1,19 +1,16 @@
 use crate::{
     error::{Eip4844PoolTransactionError, InvalidPoolTransactionError},
     identifier::{SenderId, TransactionId},
-    pool::pending::PendingTransaction,
+    pool::pending::{IndependentKey, PendingTransaction},
     PoolTransaction, Priority, TransactionOrdering, ValidPoolTransaction,
 };
 use alloy_consensus::Transaction;
 use alloy_primitives::map::AddressSet;
 use core::fmt;
-use imbl::OrdMap;
+use imbl::{OrdMap, OrdSet};
 use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use rustc_hash::FxHashSet;
-use std::{
-    collections::{BTreeSet, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::broadcast::{error::TryRecvError, Receiver};
 use tracing::debug;
 
@@ -100,7 +97,7 @@ pub struct BestTransactions<T: TransactionOrdering> {
     ///
     /// Once an `independent` transaction with the nonce `N` is returned, it unlocks `N+1`, which
     /// then can be moved from the `all` set to the `independent` set.
-    pub(crate) independent: BTreeSet<PendingTransaction<T>>,
+    pub(crate) independent: OrdSet<IndependentKey<T::PriorityValue>>,
     /// There might be the case where a yielded transactions is invalid, this will track it.
     pub(crate) invalid: FxHashSet<SenderId>,
     /// Used to receive any new pending transactions that have been added to the pool after this
@@ -172,9 +169,12 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// Removes the currently best independent transaction from the independent set and the total
     /// set.
     fn pop_best(&mut self) -> Option<PendingTransaction<T>> {
-        self.independent.pop_last().inspect(|best| {
-            self.all.remove(best.transaction.id());
-        })
+        while let Some(best) = self.independent.remove_max() {
+            if let Some(transaction) = self.all.remove(&best.id) {
+                return Some(transaction)
+            }
+        }
+        None
     }
 
     /// Checks for new transactions that have come into the `PendingPool` after this iterator was
@@ -188,7 +188,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                     IncomingTransaction::Process(tx) => {
                         let tx_id = *tx.transaction.id();
                         if self.ancestor(&tx_id).is_none() {
-                            self.independent.insert(tx.clone());
+                            self.independent.insert(tx.independent_key());
                         }
                         self.all.insert(tx_id, tx);
                     }
@@ -226,7 +226,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
 
             // Insert transactions that just got unlocked.
             if let Some(unlocked) = self.all.get(&best.unlocks()) {
-                self.independent.insert(unlocked.clone());
+                self.independent.insert(unlocked.independent_key());
             }
 
             if self.skip_blobs && best.transaction.is_eip4844() {
@@ -617,9 +617,9 @@ mod tests {
         let mut best = pool.best();
 
         // mark the first tx as invalid
-        let invalid = best.independent.iter().next().unwrap();
+        let invalid = best.independent.iter().next().unwrap().id;
         best.mark_invalid(
-            &invalid.transaction.clone(),
+            &best.all[&invalid].transaction.clone(),
             InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported),
         );
 
@@ -856,7 +856,7 @@ mod tests {
 
         // Verify that the new transaction has been added to the 'independent' set
         assert_eq!(best.independent.len(), 2);
-        assert!(best.independent.contains(&pending_tx));
+        assert!(best.independent.contains(&pending_tx.independent_key()));
     }
 
     #[test]
@@ -903,7 +903,7 @@ mod tests {
 
         // Verify that the new transaction has been added to the 'independent' set
         assert_eq!(best.independent.len(), 2);
-        assert!(best.independent.contains(&pending_tx1));
+        assert!(best.independent.contains(&pending_tx1.independent_key()));
 
         // Attempt to add a new transaction with a different nonce (not a duplicate)
         let base_tx2 = base_tx1.with_nonce(6);
@@ -926,7 +926,7 @@ mod tests {
 
         // Verify that the new transaction has not been added to the 'independent' set
         assert_eq!(best.independent.len(), 2);
-        assert!(!best.independent.contains(&pending_tx2));
+        assert!(!best.independent.contains(&pending_tx2.independent_key()));
     }
 
     #[test]
