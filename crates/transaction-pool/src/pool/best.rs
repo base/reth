@@ -98,6 +98,11 @@ pub struct BestTransactions<T: TransactionOrdering> {
     /// Once an `independent` transaction with the nonce `N` is returned, it unlocks `N+1`, which
     /// then can be moved from the `all` set to the `independent` set.
     pub(crate) independent: OrdSet<IndependentKey<T::PriorityValue>>,
+    /// Ids in `all` whose transactions this iterator has already popped.
+    ///
+    /// Popped transactions stay in `all`, which shares its nodes with the pool. Removing them
+    /// would copy a node of the shared map, and every `Arc` in it, for almost every pop.
+    pub(crate) popped: FxHashSet<TransactionId>,
     /// There might be the case where a yielded transactions is invalid, this will track it.
     pub(crate) invalid: FxHashSet<SenderId>,
     /// Used to receive any new pending transactions that have been added to the pool after this
@@ -131,7 +136,17 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// Note: for a transaction with nonce higher than the current on chain nonce this will always
     /// return an ancestor since all transactions in this pool are gapless.
     pub(crate) fn ancestor(&self, id: &TransactionId) -> Option<&PendingTransaction<T>> {
-        self.all.get(&id.unchecked_ancestor()?)
+        let ancestor = id.unchecked_ancestor()?;
+        if self.popped.contains(&ancestor) {
+            return None
+        }
+        self.all.get(&ancestor)
+    }
+
+    /// Adds a transaction to `all`, replacing any popped transaction with the same id.
+    fn insert(&mut self, id: TransactionId, transaction: PendingTransaction<T>) {
+        self.popped.remove(&id);
+        self.all.insert(id, transaction);
     }
 
     /// Non-blocking read on the new pending transactions subscription channel
@@ -170,8 +185,13 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// set.
     fn pop_best(&mut self) -> Option<PendingTransaction<T>> {
         while let Some(best) = self.independent.remove_max() {
-            if let Some(transaction) = self.all.remove(&best.id) {
-                return Some(transaction)
+            // A popped id can still have a key here if its transaction was replaced.
+            if self.popped.contains(&best.id) {
+                continue
+            }
+            if let Some(transaction) = self.all.get(&best.id) {
+                self.popped.insert(best.id);
+                return Some(transaction.clone())
             }
         }
         None
@@ -190,11 +210,11 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                         if self.ancestor(&tx_id).is_none() {
                             self.independent.insert(tx.independent_key());
                         }
-                        self.all.insert(tx_id, tx);
+                        self.insert(tx_id, tx);
                     }
                     IncomingTransaction::Stash(tx) => {
                         let tx_id = *tx.transaction.id();
-                        self.all.insert(tx_id, tx);
+                        self.insert(tx_id, tx);
                     }
                 }
             } else {
@@ -306,7 +326,9 @@ impl<T: TransactionOrdering> Iterator for BestTransactions<T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.new_transaction_receiver.is_none().then_some(self.all.len()))
+        // `popped` only holds ids that are in `all`.
+        let remaining = self.all.len() - self.popped.len();
+        (0, self.new_transaction_receiver.is_none().then_some(remaining))
     }
 }
 
@@ -857,6 +879,53 @@ mod tests {
         // Verify that the new transaction has been added to the 'independent' set
         assert_eq!(best.independent.len(), 2);
         assert!(best.independent.contains(&pending_tx.independent_key()));
+    }
+
+    #[test]
+    fn test_best_live_transactions_after_their_ancestor_or_original_was_popped() {
+        let mut pool = PendingPool::new(MockOrdering::default());
+        let mut f = MockTransactionFactory::default();
+
+        let tx = MockTransaction::eip1559();
+        let original = f.validated(tx.clone().rng_hash().with_nonce(0));
+        pool.add_transaction(Arc::new(original.clone()), 0);
+
+        let mut best = pool.best();
+        crate::traits::BestTransactions::allow_updates_out_of_order(&mut best);
+        let (tx_sender, tx_receiver) =
+            tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
+        best.new_transaction_receiver = Some(tx_receiver);
+
+        assert_eq!(best.next().unwrap().hash(), original.hash());
+        assert_eq!(best.size_hint(), (0, None));
+
+        // The child of a popped transaction is independent.
+        let child = f.validated(tx.clone().rng_hash().with_nonce(1));
+        tx_sender
+            .send(PendingTransaction {
+                submission_id: 10,
+                transaction: Arc::new(child.clone()),
+                priority: Priority::Value(1),
+            })
+            .unwrap();
+        assert_eq!(best.next().unwrap().hash(), child.hash());
+
+        // A replacement of a popped transaction is yielded again.
+        let replacement = f.validated(tx.rng_hash().with_nonce(0));
+        tx_sender
+            .send(PendingTransaction {
+                submission_id: 11,
+                transaction: Arc::new(replacement.clone()),
+                priority: Priority::Value(1),
+            })
+            .unwrap();
+        assert_eq!(best.next().unwrap().hash(), replacement.hash());
+        assert!(best.next().is_none());
+
+        // Every popped transaction is still in the snapshot.
+        assert_eq!(best.all.len(), 2);
+        best.no_updates();
+        assert_eq!(best.size_hint(), (0, Some(0)));
     }
 
     #[test]
