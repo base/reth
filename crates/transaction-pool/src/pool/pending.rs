@@ -10,7 +10,15 @@ use crate::{
 };
 use imbl::{OrdMap, OrdSet};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{cmp::Ordering, collections::hash_map::Entry, ops::Bound::Unbounded, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::hash_map::Entry,
+    ops::Bound::Unbounded,
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
 use tokio::sync::broadcast;
 
 /// A pool of validated and gapless transactions that are ready to be executed on the current state
@@ -51,6 +59,9 @@ pub struct PendingPool<T: TransactionOrdering> {
     /// Used to broadcast new transactions that have been added to the `PendingPool` to existing
     /// `static_files` of this pool.
     new_transaction_notifier: broadcast::Sender<PendingTransaction<T>>,
+    /// Number of transactions sent through `new_transaction_notifier`, incremented after each
+    /// send.
+    new_transaction_count: Arc<AtomicU64>,
 }
 
 // === impl PendingPool ===
@@ -73,6 +84,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
             highest_nonces: Default::default(),
             size_of: Default::default(),
             new_transaction_notifier,
+            new_transaction_count: Default::default(),
         }
     }
 
@@ -115,6 +127,8 @@ impl<T: TransactionOrdering> PendingPool<T> {
             popped: Default::default(),
             invalid: Default::default(),
             new_transaction_receiver: Some(self.new_transaction_notifier.subscribe()),
+            new_transaction_count: Some(self.new_transaction_count.clone()),
+            received_transaction_count: self.new_transaction_count.load(AtomicOrdering::Acquire),
             last_priority: None,
             skip_blobs: false,
             allow_updates_out_of_order: false,
@@ -353,6 +367,8 @@ impl<T: TransactionOrdering> PendingPool<T> {
         // send the new transaction to any existing pendingpool static file iterators
         if self.new_transaction_notifier.receiver_count() > 0 {
             let _ = self.new_transaction_notifier.send(tx.clone());
+            // Count after sending, so an iterator that sees the new count finds the transaction.
+            self.new_transaction_count.fetch_add(1, AtomicOrdering::Release);
         }
 
         self.by_id.insert(tx_id, tx);

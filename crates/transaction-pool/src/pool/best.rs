@@ -10,7 +10,13 @@ use core::fmt;
 use imbl::{OrdMap, OrdSet};
 use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use rustc_hash::FxHashSet;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
 use tokio::sync::broadcast::{error::TryRecvError, Receiver};
 use tracing::debug;
 
@@ -111,6 +117,14 @@ pub struct BestTransactions<T: TransactionOrdering> {
     /// These new pending transactions are inserted into this iterator's pool before yielding the
     /// next value
     pub(crate) new_transaction_receiver: Option<Receiver<PendingTransaction<T>>>,
+    /// Number of transactions the pool has sent to `new_transaction_receiver`.
+    ///
+    /// Polling an empty receiver takes the channel's lock, so it is only polled after this count
+    /// moves past `received_transaction_count`. Without a count, it is polled before every
+    /// yield.
+    pub(crate) new_transaction_count: Option<Arc<AtomicU64>>,
+    /// Value of `new_transaction_count` when `new_transaction_receiver` was last found empty.
+    pub(crate) received_transaction_count: u64,
     /// The priority value of most recently yielded transaction.
     ///
     /// This is required if new pending transactions are fed in while it yields new values.
@@ -200,6 +214,11 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// Checks for new transactions that have come into the `PendingPool` after this iterator was
     /// created and inserts them
     fn add_new_transactions(&mut self) {
+        let sent =
+            self.new_transaction_count.as_ref().map(|count| count.load(AtomicOrdering::Acquire));
+        if sent == Some(self.received_transaction_count) {
+            return
+        }
         for _ in 0..MAX_NEW_TRANSACTIONS_PER_BATCH {
             if let Some(pending_tx) = self.try_recv() {
                 //  same logic as PendingPool::add_transaction/PendingPool::best_with_unlocked
@@ -218,6 +237,10 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                     }
                 }
             } else {
+                // Every transaction counted in `sent` has been received.
+                if let Some(sent) = sent {
+                    self.received_transaction_count = sent;
+                }
                 break;
             }
         }
@@ -302,6 +325,7 @@ impl<T: TransactionOrdering> crate::traits::BestTransactions for BestTransaction
 
     fn no_updates(&mut self) {
         self.new_transaction_receiver.take();
+        self.new_transaction_count.take();
         self.last_priority.take();
     }
 
@@ -856,6 +880,7 @@ mod tests {
         let (tx_sender, tx_receiver) =
             tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
         best.new_transaction_receiver = Some(tx_receiver);
+        best.new_transaction_count = None;
 
         // Create a new transaction with nonce 5 and validate it
         let new_tx = MockTransaction::eip1559().rng_hash().with_nonce(5);
@@ -895,6 +920,7 @@ mod tests {
         let (tx_sender, tx_receiver) =
             tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
         best.new_transaction_receiver = Some(tx_receiver);
+        best.new_transaction_count = None;
 
         assert_eq!(best.next().unwrap().hash(), original.hash());
         assert_eq!(best.size_hint(), (0, None));
@@ -929,6 +955,28 @@ mod tests {
     }
 
     #[test]
+    fn test_best_receives_more_live_transactions_than_one_batch() {
+        let mut pool = PendingPool::new(MockOrdering::default());
+        let mut f = MockTransactionFactory::default();
+        pool.add_transaction(Arc::new(f.validated(MockTransaction::eip1559())), 0);
+
+        let mut best = pool.best();
+        crate::traits::BestTransactions::allow_updates_out_of_order(&mut best);
+        assert!(best.next().is_some());
+        assert!(best.next().is_none());
+
+        let live = 3 * MAX_NEW_TRANSACTIONS_PER_BATCH + 1;
+        for _ in 0..live {
+            pool.add_transaction(Arc::new(f.validated(MockTransaction::eip1559())), 0);
+        }
+        assert_eq!(best.by_ref().count(), live);
+
+        pool.add_transaction(Arc::new(f.validated(MockTransaction::eip1559())), 0);
+        assert!(best.next().is_some());
+        assert!(best.next().is_none());
+    }
+
+    #[test]
     fn test_best_add_transaction_with_ancestor() {
         // Initialize a new PendingPool with default MockOrdering and MockTransactionFactory
         let mut pool = PendingPool::new(MockOrdering::default());
@@ -950,6 +998,7 @@ mod tests {
         let (tx_sender, tx_receiver) =
             tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
         best.new_transaction_receiver = Some(tx_receiver);
+        best.new_transaction_count = None;
 
         // Create a new transaction with nonce 5 and validate it
         let base_tx1 = MockTransaction::eip1559().rng_hash().with_nonce(5);
@@ -1184,6 +1233,7 @@ mod tests {
         let (_tx_sender, tx_receiver) =
             tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
         best.new_transaction_receiver = Some(tx_receiver);
+        best.new_transaction_count = None;
 
         // Ensure receiver is set
         assert!(best.new_transaction_receiver.is_some());
@@ -1233,6 +1283,7 @@ mod tests {
         let (tx_sender, tx_receiver) =
             tokio::sync::broadcast::channel::<PendingTransaction<MockOrdering>>(1000);
         best.new_transaction_receiver = Some(tx_receiver);
+        best.new_transaction_count = None;
 
         // yield one tx, effectively locking in the highest prio
         let first = best.next().unwrap();
