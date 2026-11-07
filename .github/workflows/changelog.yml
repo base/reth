@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+permissions:
+  contents: read
+
 jobs:
   changelog:
     # Skip for fork PRs since they can't access secrets
@@ -13,12 +16,17 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
       - run: npm install -g @anthropic-ai/claude-code
-      - uses: wevm/changelogs/check@master
+      - uses: wevm/changelogs/check@dcd79352c688ddbf6c8f515a68cd235cb80d2660 # master
         with:
           ai: 'claude -p'
         env:
