@@ -917,6 +917,8 @@ mod tests {
     /// state at block 200, and `MerkleUnwind` already at 200. The state is wide enough that the
     /// trie stores branch hashes below the root, so trie nodes the stage fails to update stay
     /// stale and break the next validated root.
+    // `Account` is only `Copy` without the `account-ext` feature.
+    #[allow(clippy::clone_on_copy)]
     async fn start_round() -> (MerkleTestRunner, ExecInput) {
         let mut runner = MerkleTestRunner {
             db: TestStageDB::default(),
@@ -940,7 +942,7 @@ mod tests {
             .insert_accounts_and_storages(
                 extra_accounts
                     .iter()
-                    .map(|(address, account)| (*address, (*account, std::iter::empty()))),
+                    .map(|(address, account)| (*address, (account.clone(), std::iter::empty()))),
             )
             .unwrap();
         let late_changes = extra_accounts.iter().step_by(10);
@@ -949,7 +951,7 @@ mod tests {
             .insert_changesets(
                 [late_changes
                     .clone()
-                    .map(|(address, account)| (*address, *account, Vec::new()))
+                    .map(|(address, account)| (*address, account.clone(), Vec::new()))
                     .collect::<Vec<_>>()],
                 Some(LATE_CHANGE_BLOCK),
             )
@@ -957,7 +959,8 @@ mod tests {
         runner
             .db
             .insert_accounts_and_storages(late_changes.map(|(address, account)| {
-                let account = Account { balance: account.balance + U256::from(1), ..*account };
+                let account =
+                    Account { balance: account.balance + U256::from(1), ..account.clone() };
                 (*address, (account, std::iter::empty()))
             }))
             .unwrap();
