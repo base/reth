@@ -12,8 +12,9 @@ use reth_provider::{
     StageCheckpointWriter, StatsReader, StorageChangeSetReader, StorageSettingsCache, TrieWriter,
 };
 use reth_stages_api::{
-    BlockErrorKind, EntitiesCheckpoint, ExecInput, ExecOutput, MerkleCheckpoint, Stage,
-    StageCheckpoint, StageError, StageId, StorageRootMerkleCheckpoint, UnwindInput, UnwindOutput,
+    BlockErrorKind, CheckpointBlockRange, EntitiesCheckpoint, ExecInput, ExecOutput,
+    ExecutionCheckpoint, MerkleCheckpoint, Stage, StageCheckpoint, StageError, StageId,
+    StorageRootMerkleCheckpoint, UnwindInput, UnwindOutput,
 };
 use reth_trie::{IntermediateStateRootState, StateRoot, StateRootProgress, StoredSubNode};
 use reth_trie_db::DatabaseStateRoot;
@@ -319,28 +320,48 @@ where
             // updates stay bounded by one chunk and a restart resumes after the last committed one.
             //
             // Hashed state is already at the pipeline target, so a chunk's root is not the root of
-            // its last block and only the final chunk can be validated. The committed trie holds
-            // target values for every key changed up to the checkpoint; the remaining range's
-            // prefix sets cover every key that changes after it, so resuming forward, even toward a
-            // newer target, still ends at the right root.
-            let chunk = input.next_block_range_with_threshold(incremental_threshold);
-            let chunk_to = *chunk.block_range.end();
+            // its last block and only the final chunk can be validated. The block checkpoint stays
+            // at the last validated block, which keeps it a safe unwind target, and the execution
+            // checkpoint records the last committed chunk. The committed trie holds target values
+            // for every key changed up to that chunk; the remaining range's prefix sets cover every
+            // key that changes after it, so resuming forward, even toward a newer target, still
+            // ends at the right root. `MerkleUnwind` clears the progress when it rewrites the trie.
+            let chunk_from = input
+                .checkpoint()
+                .execution_stage_checkpoint()
+                .filter(|progress| {
+                    progress.block_range.from == from_block && progress.block_range.to < to_block
+                })
+                .map_or(from_block, |progress| progress.block_range.to + 1);
+            let chunk_to = to_block.min(chunk_from.saturating_add(incremental_threshold - 1));
             debug!(
                 target: "sync::stages::merkle::exec",
                 current = ?current_block_number,
                 target = ?to_block,
                 incremental_threshold,
-                chunk_range = ?chunk.block_range,
+                chunk_range = ?(chunk_from..=chunk_to),
                 "Processing chunk"
             );
             let (root, updates) = reth_trie_db::with_adapter!(provider, |A| {
-                DbStateRoot::<_, A>::incremental_root_with_updates(provider, chunk.block_range)
+                DbStateRoot::<_, A>::incremental_root_with_updates(provider, chunk_from..=chunk_to)
             })
             .map_err(|e| {
                 error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
                 StageError::Fatal(Box::new(e))
             })?;
             provider.write_trie_updates(updates)?;
+
+            if chunk_to < to_block {
+                return Ok(ExecOutput::in_progress(
+                    input.checkpoint().with_execution_stage_checkpoint(ExecutionCheckpoint {
+                        block_range: CheckpointBlockRange { from: from_block, to: chunk_to },
+                        progress: EntitiesCheckpoint {
+                            processed: chunk_to - current_block_number,
+                            total: to_block - current_block_number,
+                        },
+                    }),
+                ))
+            }
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
@@ -353,13 +374,6 @@ where
                 processed: total_hashed_entries,
                 total: total_hashed_entries,
             };
-
-            if !chunk.is_final_range {
-                return Ok(ExecOutput::in_progress(
-                    StageCheckpoint::new(chunk_to)
-                        .with_entities_stage_checkpoint(entities_checkpoint),
-                ))
-            }
 
             // Save the checkpoint
             (root, entities_checkpoint)
@@ -386,13 +400,21 @@ where
             info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
             return Ok(UnwindOutput { checkpoint: StageCheckpoint::new(input.unwind_to) })
         }
-        // MerkleExecute is unwound first, so its checkpoint is `unwind_to` unless it had not
-        // reached that block. Incremental chunks commit trie updates only up to that
-        // checkpoint; keys changed after it can still have stale nodes, so they must be
-        // recomputed too.
-        let merkle_execute = provider
-            .get_stage_checkpoint(StageId::MerkleExecute)?
-            .map_or(input.unwind_to, |checkpoint| checkpoint.block_number);
+        // `MerkleExecute` is unwound first, so its block checkpoint is `unwind_to` unless it had
+        // not validated that block yet. Its committed chunks only cover keys changed up to their
+        // last block; keys changed after its checkpoint can still have stale nodes, so they must
+        // be recomputed too. The recomputed trie no longer matches its chunk progress, so clear it.
+        let merkle_execute = provider.get_stage_checkpoint(StageId::MerkleExecute)?;
+        if let Some(checkpoint) =
+            merkle_execute.filter(|checkpoint| checkpoint.execution_stage_checkpoint().is_some())
+        {
+            provider.save_stage_checkpoint(
+                StageId::MerkleExecute,
+                StageCheckpoint::new(checkpoint.block_number),
+            )?;
+        }
+        let merkle_execute =
+            merkle_execute.map_or(input.unwind_to, |checkpoint| checkpoint.block_number);
         let range = merkle_execute.min(input.unwind_to) + 1..=input.checkpoint.block_number;
         let walk_all_changed_branch_children = match self {
             Self::Unwind { walk_all_changed_branch_children } => *walk_all_changed_branch_children,
@@ -610,13 +632,15 @@ mod tests {
 
         runner.seed_execution(input).expect("failed to seed execution");
 
-        // Each call commits one chunk and stops at its last block until the target is reached.
+        // Each call commits one chunk and records it, keeping the block checkpoint at the last
+        // validated block until the target is reached.
         let mut chunk_ends = Vec::new();
         let result = loop {
             let result = runner.execute(input).await.unwrap();
             match result {
                 Ok(ExecOutput { checkpoint, done: false }) => {
-                    chunk_ends.push(checkpoint.block_number);
+                    assert_eq!(checkpoint.block_number, stage_progress);
+                    chunk_ends.push(last_committed_chunk(checkpoint).unwrap());
                     input.checkpoint = Some(checkpoint);
                 }
                 result => break result,
@@ -683,7 +707,7 @@ mod tests {
         }
         let provider = runner.db.factory.provider_rw().unwrap();
         let uncommitted = runner.stage().execute(&*provider, input).unwrap();
-        assert_eq!(uncommitted.checkpoint.block_number, ROUND_START + 30);
+        assert_eq!(last_committed_chunk(uncommitted.checkpoint), Some(ROUND_START + 30));
         drop(provider);
 
         let output = execute_until_done(&runner, input).await.unwrap();
@@ -711,13 +735,47 @@ mod tests {
             assert!(!output.done);
             input.checkpoint = Some(output.checkpoint);
         }
-        assert_eq!(input.checkpoint().block_number, ROUND_START + 30);
+        assert_eq!(last_committed_chunk(input.checkpoint()), Some(ROUND_START + 30));
 
         // The next round's hashing reaches block 200 before `MerkleExecute` resumes.
         restore_hashed_state(&runner.db, target_hashed_state);
         input.target = Some(ROUND_TARGET);
         let output = execute_until_done(&runner, input).await.unwrap();
         assert_eq!(output.checkpoint.block_number, ROUND_TARGET);
+    }
+
+    /// A wrong root at the end of a chunked range fails the stage with its block checkpoint still
+    /// at the last validated block, so the pipeline unwinds to a block whose root holds.
+    #[tokio::test]
+    async fn final_root_error_keeps_checkpoint_at_last_validated_block() {
+        let (runner, mut input) = start_round().await;
+        set_header_state_root(&runner.db, ROUND_TARGET, B256::repeat_byte(0x42));
+
+        let error = loop {
+            match runner.execute(input).await.unwrap() {
+                Ok(output) => {
+                    assert!(!output.done);
+                    assert_eq!(output.checkpoint.block_number, ROUND_START);
+                    input.checkpoint = Some(output.checkpoint);
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_matches!(error, StageError::Block { .. });
+        assert_eq!(last_committed_chunk(input.checkpoint()), Some(ROUND_TARGET - 10));
+
+        // On a block error the pipeline keeps the previous checkpoint and unwinds to its block.
+        let provider = runner.db.factory.provider_rw().unwrap();
+        provider.save_stage_checkpoint(StageId::MerkleExecute, input.checkpoint()).unwrap();
+        provider.commit().unwrap();
+        let unwind = UnwindInput {
+            checkpoint: StageCheckpoint::new(ROUND_TARGET),
+            unwind_to: input.checkpoint().block_number,
+            bad_block: None,
+        };
+        runner.before_unwind(unwind).unwrap();
+        let output = runner.unwind(unwind).await.unwrap();
+        assert_eq!(output.checkpoint.block_number, ROUND_START);
     }
 
     /// A short range after an interrupted rebuild finishes the rebuild instead of updating the
@@ -789,23 +847,18 @@ mod tests {
     }
 
     /// Unwinds to `unwind_to` after `MerkleExecute` committed one chunk, through block 110, of the
-    /// round from [`start_round`].
+    /// round from [`start_round`], then runs the next round to the target.
     async fn unwind_after_partial_incremental_merkle(unwind_to: BlockNumber) {
-        let last_chunk_end = ROUND_START + 10;
-        let (runner, mut input) = start_round().await;
-        while input.checkpoint().block_number < last_chunk_end {
-            let output = runner.execute(input).await.unwrap().unwrap();
-            input.checkpoint = Some(output.checkpoint);
-        }
+        let (runner, input) = start_round().await;
+        let target_hashed_state = hashed_state(&runner.db);
+        let output = runner.execute(input).await.unwrap().unwrap();
+        assert_eq!(output.checkpoint.block_number, ROUND_START);
+        assert_eq!(last_committed_chunk(output.checkpoint), Some(ROUND_START + 10));
 
-        // The pipeline unwinds MerkleExecute first, which only moves its checkpoint down.
+        // The pipeline saves each call's checkpoint. It then unwinds `MerkleExecute` first, which
+        // leaves it alone: its block checkpoint, the round start, is not above `unwind_to`.
         let provider = runner.db.factory.provider_rw().unwrap();
-        provider
-            .save_stage_checkpoint(
-                StageId::MerkleExecute,
-                StageCheckpoint::new(last_chunk_end.min(unwind_to)),
-            )
-            .unwrap();
+        provider.save_stage_checkpoint(StageId::MerkleExecute, output.checkpoint).unwrap();
         provider.commit().unwrap();
 
         let unwind = UnwindInput {
@@ -819,6 +872,30 @@ mod tests {
         // The stage validates the recomputed root against the header of `unwind_to`.
         let output = runner.unwind(unwind).await.unwrap();
         assert_eq!(output.checkpoint.block_number, unwind_to);
+        let merkle_execute = runner
+            .db
+            .factory
+            .provider()
+            .unwrap()
+            .get_stage_checkpoint(StageId::MerkleExecute)
+            .unwrap();
+        assert_eq!(merkle_execute, Some(StageCheckpoint::new(ROUND_START)));
+
+        // The next round hashes up to the target again and resumes from `MerkleExecute`'s
+        // checkpoint; the stage validates the root at the target.
+        restore_hashed_state(&runner.db, target_hashed_state);
+        let output = execute_until_done(
+            &runner,
+            ExecInput { target: Some(ROUND_TARGET), checkpoint: merkle_execute },
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.checkpoint.block_number, ROUND_TARGET);
+    }
+
+    /// Returns the last block of the chunks an in-progress incremental range has committed.
+    fn last_committed_chunk(checkpoint: StageCheckpoint) -> Option<BlockNumber> {
+        checkpoint.execution_stage_checkpoint().map(|progress| progress.block_range.to)
     }
 
     const ROUND_START: BlockNumber = 100;
