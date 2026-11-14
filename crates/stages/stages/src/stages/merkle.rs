@@ -696,6 +696,15 @@ mod tests {
     async fn incremental_merkle_resumes_toward_newer_target() {
         let (runner, mut input) = start_round().await;
 
+        // The interrupted round targeted block 150, so hashing had only reached that block.
+        let target_hashed_state = hashed_state(&runner.db);
+        runner
+            .before_unwind(UnwindInput {
+                checkpoint: StageCheckpoint::new(ROUND_TARGET),
+                unwind_to: 150,
+                bad_block: None,
+            })
+            .unwrap();
         input.target = Some(150);
         for _ in 0..3 {
             let output = runner.execute(input).await.unwrap().unwrap();
@@ -704,6 +713,8 @@ mod tests {
         }
         assert_eq!(input.checkpoint().block_number, ROUND_START + 30);
 
+        // The next round's hashing reaches block 200 before `MerkleExecute` resumes.
+        restore_hashed_state(&runner.db, target_hashed_state);
         input.target = Some(ROUND_TARGET);
         let output = execute_until_done(&runner, input).await.unwrap();
         assert_eq!(output.checkpoint.block_number, ROUND_TARGET);

@@ -664,12 +664,20 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 }
             }
 
+            // Incremental MerkleExecute commits its checkpoint after each chunk without validating
+            // that block's state root, so unwind to the last block whose root was validated: Finish
+            // only advances after MerkleExecute validated the end of a range.
+            let mut target = prev_checkpoint.unwrap_or_default().block_number;
+            if stage_id == StageId::MerkleExecute &&
+                let Some(finish) =
+                    self.provider_factory.provider()?.get_stage_checkpoint(StageId::Finish)?
+            {
+                target = target.min(finish.block_number);
+            }
+
             // We unwind because of a block error. If the unwind itself fails, we bail entirely;
             // otherwise, we restart the execution loop from the beginning.
-            Ok(Some(ControlFlow::Unwind {
-                target: prev_checkpoint.unwrap_or_default().block_number,
-                bad_block: block,
-            }))
+            Ok(Some(ControlFlow::Unwind { target, bad_block: block }))
         } else if let StageError::MissingStaticFileData { block, segment } = err {
             error!(
                 target: "sync::pipeline",
@@ -1245,6 +1253,57 @@ mod tests {
                     result: ExecOutput::done(StageCheckpoint::new(10)),
                 },
             ]
+        );
+    }
+
+    /// A state-root error after `MerkleExecute` committed unvalidated chunks unwinds to the last
+    /// validated block, the Finish checkpoint, not to the last committed chunk.
+    #[tokio::test]
+    async fn merkle_execute_validation_error_unwinds_to_finish_checkpoint() {
+        let provider_factory = create_test_provider_factory();
+        let provider_rw = provider_factory.provider_rw().unwrap();
+        provider_rw.save_stage_checkpoint(StageId::Finish, StageCheckpoint::new(100)).unwrap();
+        provider_rw
+            .save_stage_checkpoint(StageId::MerkleExecute, StageCheckpoint::new(100))
+            .unwrap();
+        provider_rw.commit().unwrap();
+
+        let mut pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
+            .add_stage(
+                TestStage::new(StageId::MerkleExecute)
+                    .add_exec(Ok(ExecOutput::in_progress(StageCheckpoint::new(110))))
+                    .add_exec(Err(StageError::Block {
+                        block: Box::new(random_block_with_parent(
+                            &mut generators::rng(),
+                            200,
+                            Default::default(),
+                        )),
+                        error: BlockErrorKind::Validation(ConsensusError::BaseFeeMissing),
+                    }))
+                    .add_unwind(Ok(UnwindOutput { checkpoint: StageCheckpoint::new(100) }))
+                    .add_exec(Ok(ExecOutput::done(StageCheckpoint::new(200)))),
+            )
+            .with_max_block(200)
+            .build(
+                provider_factory.clone(),
+                StaticFileProducer::new(provider_factory.clone(), PruneModes::default()),
+            );
+        let events = pipeline.events();
+        tokio::spawn(async move {
+            pipeline.run().await.expect("Could not run pipeline");
+        });
+
+        let events = events.collect::<Vec<PipelineEvent>>().await;
+        assert!(
+            events.contains(&PipelineEvent::Unwind {
+                stage_id: StageId::MerkleExecute,
+                input: UnwindInput {
+                    checkpoint: StageCheckpoint::new(110),
+                    unwind_to: 100,
+                    bad_block: Some(200),
+                },
+            }),
+            "{events:?}"
         );
     }
 
