@@ -413,9 +413,16 @@ where
                 StageCheckpoint::new(checkpoint.block_number),
             )?;
         }
-        let merkle_execute =
-            merkle_execute.map_or(input.unwind_to, |checkpoint| checkpoint.block_number);
-        let range = merkle_execute.min(input.unwind_to) + 1..=input.checkpoint.block_number;
+        // A rebuild in progress cleared the trie and writes target values, so it needs no wider
+        // range, and widening it to a rebuild's range start can load the whole chain's changesets.
+        let range = if self.get_execution_checkpoint(provider)?.is_some() {
+            input.unwind_block_range()
+        } else {
+            merkle_execute
+                .map_or(input.unwind_to, |checkpoint| checkpoint.block_number)
+                .min(input.unwind_to) +
+                1..=input.checkpoint.block_number
+        };
         let walk_all_changed_branch_children = match self {
             Self::Unwind { walk_all_changed_branch_children } => *walk_all_changed_branch_children,
             #[cfg(any(test, feature = "test-utils"))]
@@ -751,9 +758,12 @@ mod tests {
         let (runner, mut input) = start_round().await;
         set_header_state_root(&runner.db, ROUND_TARGET, B256::repeat_byte(0x42));
 
+        // Like the pipeline, commit each successful call and drop the transaction of a failed one.
         let error = loop {
-            match runner.execute(input).await.unwrap() {
+            let provider = runner.db.factory.provider_rw().unwrap();
+            match runner.stage().execute(&*provider, input) {
                 Ok(output) => {
+                    provider.commit().unwrap();
                     assert!(!output.done);
                     assert_eq!(output.checkpoint.block_number, ROUND_START);
                     input.checkpoint = Some(output.checkpoint);
