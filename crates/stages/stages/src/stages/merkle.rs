@@ -932,7 +932,7 @@ mod tests {
         let extra_accounts = (1..=2000u64)
             .map(|i| {
                 let address = Address::from_word(B256::from(U256::from(i)));
-                (address, Account { nonce: 1, balance: U256::from(i), bytecode_hash: None })
+                (address, Account { nonce: 1, balance: U256::from(i), ..Default::default() })
             })
             .collect::<Vec<_>>();
         runner
