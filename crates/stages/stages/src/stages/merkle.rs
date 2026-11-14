@@ -313,33 +313,32 @@ where
             }
         } else {
             debug!(target: "sync::stages::merkle::exec", current = ?current_block_number, target = ?to_block, "Updating trie in chunks");
-            let mut final_root = None;
-            for start_block in range.step_by(incremental_threshold as usize) {
-                let chunk_to = std::cmp::min(start_block + incremental_threshold - 1, to_block);
-                let chunk_range = start_block..=chunk_to;
-                debug!(
-                    target: "sync::stages::merkle::exec",
-                    current = ?current_block_number,
-                    target = ?to_block,
-                    incremental_threshold,
-                    chunk_range = ?chunk_range,
-                    "Processing chunk"
-                );
-                let (root, updates) = reth_trie_db::with_adapter!(provider, |A| {
-                    DbStateRoot::<_, A>::incremental_root_with_updates(provider, chunk_range)
-                })
-                .map_err(|e| {
-                    error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
-                    StageError::Fatal(Box::new(e))
-                })?;
-                provider.write_trie_updates(updates)?;
-                final_root = Some(root);
-            }
-
-            // if we had no final root, we must have not looped above, which should not be possible
-            let final_root = final_root.ok_or(StageError::Fatal(
-                "Incremental merkle hashing did not produce a final root".into(),
-            ))?;
+            // One chunk per call: the pipeline commits after each call, so the uncommitted trie
+            // updates stay bounded by one chunk and a restart resumes after the last committed one.
+            //
+            // Hashed state is already at the pipeline target, so a chunk's root is not the root of
+            // its last block and only the final chunk can be validated. The committed trie holds
+            // target values for every key changed up to the checkpoint; the remaining range's
+            // prefix sets cover every key that changes after it, so resuming forward, even toward a
+            // newer target, still ends at the right root.
+            let chunk = input.next_block_range_with_threshold(incremental_threshold);
+            let chunk_to = *chunk.block_range.end();
+            debug!(
+                target: "sync::stages::merkle::exec",
+                current = ?current_block_number,
+                target = ?to_block,
+                incremental_threshold,
+                chunk_range = ?chunk.block_range,
+                "Processing chunk"
+            );
+            let (root, updates) = reth_trie_db::with_adapter!(provider, |A| {
+                DbStateRoot::<_, A>::incremental_root_with_updates(provider, chunk.block_range)
+            })
+            .map_err(|e| {
+                error!(target: "sync::stages::merkle", %e, ?current_block_number, ?to_block, "Incremental state root failed! {INVALID_STATE_ROOT_ERROR_MESSAGE}");
+                StageError::Fatal(Box::new(e))
+            })?;
+            provider.write_trie_updates(updates)?;
 
             let total_hashed_entries = (provider.count_entries::<tables::HashedAccounts>()? +
                 provider.count_entries::<tables::HashedStorages>()?)
@@ -352,8 +351,16 @@ where
                 processed: total_hashed_entries,
                 total: total_hashed_entries,
             };
+
+            if !chunk.is_final_range {
+                return Ok(ExecOutput::in_progress(
+                    StageCheckpoint::new(chunk_to)
+                        .with_entities_stage_checkpoint(entities_checkpoint),
+                ))
+            }
+
             // Save the checkpoint
-            (final_root, entities_checkpoint)
+            (root, entities_checkpoint)
         };
 
         // Reset the checkpoint
@@ -579,16 +586,32 @@ mod tests {
         let mut runner =
             MerkleTestRunner { db: TestStageDB::default(), clean_threshold, incremental_threshold };
 
-        let input = ExecInput {
+        let mut input = ExecInput {
             target: Some(previous_stage),
             checkpoint: Some(StageCheckpoint::new(stage_progress)),
         };
 
         runner.seed_execution(input).expect("failed to seed execution");
-        let rx = runner.execute(input);
 
-        // Assert the successful result
-        let result = rx.await.unwrap();
+        // Each call commits one chunk and stops at its last block until the target is reached.
+        let mut chunk_ends = Vec::new();
+        let result = loop {
+            let result = runner.execute(input).await.unwrap();
+            match result {
+                Ok(ExecOutput { checkpoint, done: false }) => {
+                    chunk_ends.push(checkpoint.block_number);
+                    input.checkpoint = Some(checkpoint);
+                }
+                result => break result,
+            }
+        };
+        assert_eq!(
+            chunk_ends,
+            (stage_progress + incremental_threshold..previous_stage)
+                .step_by(incremental_threshold as usize)
+                .collect::<Vec<_>>()
+        );
+
         assert_matches!(
             result,
             Ok(ExecOutput {
