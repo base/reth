@@ -213,11 +213,13 @@ where
             .ok_or_else(|| ProviderError::HeaderNotFound(to_block.into()))?;
         let target_block_root = target_block.state_root();
 
+        // A rebuild clears the trie tables before it starts, so if one was interrupted, finish it:
+        // updating the partial trie incrementally would recompute every missing node in memory.
+        let mut checkpoint = self.get_execution_checkpoint(provider)?;
+
         let (trie_root, entities_checkpoint) = if range.is_empty() {
             (target_block_root, input.checkpoint().entities_stage_checkpoint().unwrap_or_default())
-        } else if to_block - from_block > threshold || from_block == 1 {
-            let mut checkpoint = self.get_execution_checkpoint(provider)?;
-
+        } else if to_block - from_block > threshold || from_block == 1 || checkpoint.is_some() {
             // if there are more blocks than threshold it is faster to rebuild the trie
             let mut entities_checkpoint = if let Some(checkpoint) =
                 checkpoint.as_ref().filter(|c| c.target_block == to_block)
@@ -380,11 +382,18 @@ where
         input: UnwindInput,
     ) -> Result<UnwindOutput, StageError> {
         let tx = provider.tx_ref();
-        let range = input.unwind_block_range();
         if matches!(self, Self::Execution { .. }) {
             info!(target: "sync::stages::merkle::unwind", "Stage is always skipped");
             return Ok(UnwindOutput { checkpoint: StageCheckpoint::new(input.unwind_to) })
         }
+        // MerkleExecute is unwound first, so its checkpoint is `unwind_to` unless it had not
+        // reached that block. Incremental chunks commit trie updates only up to that
+        // checkpoint; keys changed after it can still have stale nodes, so they must be
+        // recomputed too.
+        let merkle_execute = provider
+            .get_stage_checkpoint(StageId::MerkleExecute)?
+            .map_or(input.unwind_to, |checkpoint| checkpoint.block_number);
+        let range = merkle_execute.min(input.unwind_to) + 1..=input.checkpoint.block_number;
         let walk_all_changed_branch_children = match self {
             Self::Unwind { walk_all_changed_branch_children } => *walk_all_changed_branch_children,
             #[cfg(any(test, feature = "test-utils"))]
@@ -479,18 +488,26 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, StorageKind,
         TestRunnerError, TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{keccak256, U256};
+    use alloy_primitives::{keccak256, Address, U256};
     use assert_matches::assert_matches;
     use reth_db_api::cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO};
-    use reth_primitives_traits::{SealedBlock, StorageEntry};
-    use reth_provider::{providers::StaticFileWriter, StaticFileProviderFactory};
+    use reth_primitives_traits::{Account, SealedBlock, StorageEntry};
+    use reth_provider::{
+        providers::StaticFileWriter, BlockNumReader, ProviderResult, StaticFileProviderFactory,
+    };
     use reth_stages_api::StageUnitCheckpoint;
     use reth_static_file_types::StaticFileSegment;
     use reth_testing_utils::generators::{
         self, random_block, random_block_range, random_changeset_range,
         random_contract_account_range, BlockParams, BlockRangeParams,
     };
-    use reth_trie::test_utils::{state_root, state_root_prehashed};
+    use reth_trie::{
+        test_utils::{state_root, state_root_prehashed},
+        trie_cursor::{TrieCursor, TrieCursorFactory},
+        updates::{StorageTrieUpdates, TrieUpdates},
+        BranchNodeCompact, Nibbles,
+    };
+    use reth_trie_db::DatabaseTrieCursorFactory;
     use std::collections::BTreeMap;
 
     stage_test_suite_ext!(MerkleTestRunner, merkle);
@@ -654,6 +671,314 @@ mod tests {
         );
     }
 
+    /// A crash before a chunk commits loses only that chunk: retrying the same input finishes, and
+    /// the stage validates the final root against the target header.
+    #[tokio::test]
+    async fn incremental_merkle_retries_uncommitted_chunk() {
+        let (runner, mut input) = start_round().await;
+
+        for _ in 0..2 {
+            let output = runner.execute(input).await.unwrap().unwrap();
+            input.checkpoint = Some(output.checkpoint);
+        }
+        let provider = runner.db.factory.provider_rw().unwrap();
+        let uncommitted = runner.stage().execute(&*provider, input).unwrap();
+        assert_eq!(uncommitted.checkpoint.block_number, ROUND_START + 30);
+        drop(provider);
+
+        let output = execute_until_done(&runner, input).await.unwrap();
+        assert_eq!(output.checkpoint.block_number, ROUND_TARGET);
+    }
+
+    /// A round interrupted after some chunks resumes from its checkpoint when the next round
+    /// targets a later block, and the stage validates the root at that block.
+    #[tokio::test]
+    async fn incremental_merkle_resumes_toward_newer_target() {
+        let (runner, mut input) = start_round().await;
+
+        input.target = Some(150);
+        for _ in 0..3 {
+            let output = runner.execute(input).await.unwrap().unwrap();
+            assert!(!output.done);
+            input.checkpoint = Some(output.checkpoint);
+        }
+        assert_eq!(input.checkpoint().block_number, ROUND_START + 30);
+
+        input.target = Some(ROUND_TARGET);
+        let output = execute_until_done(&runner, input).await.unwrap();
+        assert_eq!(output.checkpoint.block_number, ROUND_TARGET);
+    }
+
+    /// A short range after an interrupted rebuild finishes the rebuild instead of updating the
+    /// partial trie incrementally.
+    #[tokio::test]
+    async fn interrupted_rebuild_is_finished_on_short_range() {
+        let (target, round_start) = (110, 100);
+        let mut runner = MerkleTestRunner {
+            db: TestStageDB::default(),
+            clean_threshold: 100,
+            incremental_threshold: 10,
+        };
+        let input =
+            ExecInput { target: Some(target), checkpoint: Some(StageCheckpoint::new(round_start)) };
+        runner.seed_execution(input).expect("failed to seed execution");
+
+        // The interrupted rebuild left its inner checkpoint and a storage trie node for an account
+        // that does not exist. Incremental updates never visit that storage trie; a rebuild
+        // clears it.
+        let stray_account = B256::repeat_byte(0xab);
+        let stray_path = Nibbles::from_nibbles([0xf, 0xf]);
+        let provider = runner.db.factory.provider_rw().unwrap();
+        let mut storage_updates = StorageTrieUpdates::default();
+        storage_updates.storage_nodes.insert(
+            stray_path,
+            BranchNodeCompact::new(
+                0b11,
+                0,
+                0b11,
+                vec![B256::repeat_byte(1), B256::repeat_byte(2)],
+                None,
+            ),
+        );
+        let mut updates = TrieUpdates::default();
+        updates.storage_tries.insert(stray_account, storage_updates);
+        provider.write_trie_updates(updates).unwrap();
+        runner
+            .stage()
+            .save_execution_checkpoint(
+                &*provider,
+                Some(MerkleCheckpoint::new(target + 1, B256::ZERO, Vec::new(), Default::default())),
+            )
+            .unwrap();
+        provider.commit().unwrap();
+
+        let output = execute_until_done(&runner, input).await.unwrap();
+        assert_eq!(output.checkpoint.block_number, target);
+
+        let provider = runner.db.factory.provider().unwrap();
+        assert!(runner.stage().get_execution_checkpoint(&provider).unwrap().is_none());
+        let stray = reth_trie_db::with_adapter!(provider, |A| {
+            DatabaseTrieCursorFactory::<_, A>::new(provider.tx_ref())
+                .storage_trie_cursor(stray_account)
+                .unwrap()
+                .seek_exact(stray_path)
+                .unwrap()
+        });
+        assert!(stray.is_none(), "the rebuild clears the partial trie");
+    }
+
+    #[tokio::test]
+    async fn unwind_before_last_committed_chunk() {
+        unwind_after_partial_incremental_merkle(105).await;
+    }
+
+    #[tokio::test]
+    async fn unwind_past_last_committed_chunk() {
+        unwind_after_partial_incremental_merkle(190).await;
+    }
+
+    /// Unwinds to `unwind_to` after `MerkleExecute` committed one chunk, through block 110, of the
+    /// round from [`start_round`].
+    async fn unwind_after_partial_incremental_merkle(unwind_to: BlockNumber) {
+        let last_chunk_end = ROUND_START + 10;
+        let (runner, mut input) = start_round().await;
+        while input.checkpoint().block_number < last_chunk_end {
+            let output = runner.execute(input).await.unwrap().unwrap();
+            input.checkpoint = Some(output.checkpoint);
+        }
+
+        // The pipeline unwinds MerkleExecute first, which only moves its checkpoint down.
+        let provider = runner.db.factory.provider_rw().unwrap();
+        provider
+            .save_stage_checkpoint(
+                StageId::MerkleExecute,
+                StageCheckpoint::new(last_chunk_end.min(unwind_to)),
+            )
+            .unwrap();
+        provider.commit().unwrap();
+
+        let unwind = UnwindInput {
+            checkpoint: StageCheckpoint::new(ROUND_TARGET),
+            unwind_to,
+            bad_block: None,
+        };
+        runner.before_unwind(unwind).unwrap();
+        set_header_state_root(&runner.db, unwind_to, hashed_state_root(&runner.db).unwrap());
+
+        // The stage validates the recomputed root against the header of `unwind_to`.
+        let output = runner.unwind(unwind).await.unwrap();
+        assert_eq!(output.checkpoint.block_number, unwind_to);
+    }
+
+    const ROUND_START: BlockNumber = 100;
+    const ROUND_TARGET: BlockNumber = 200;
+    /// Block at which every tenth extra account in [`start_round`] changes, and nothing else.
+    const LATE_CHANGE_BLOCK: BlockNumber = 151;
+
+    /// Sets up a pipeline round as `MerkleExecute` finds it: the trie built at block 100, hashed
+    /// state at block 200, and `MerkleUnwind` already at 200. The state is wide enough that the
+    /// trie stores branch hashes below the root, so trie nodes the stage fails to update stay
+    /// stale and break the next validated root.
+    async fn start_round() -> (MerkleTestRunner, ExecInput) {
+        let mut runner = MerkleTestRunner {
+            db: TestStageDB::default(),
+            clean_threshold: 1000,
+            incremental_threshold: 10,
+        };
+        let input = ExecInput {
+            target: Some(ROUND_TARGET),
+            checkpoint: Some(StageCheckpoint::new(ROUND_START)),
+        };
+        runner.seed_execution(input).expect("failed to seed execution");
+
+        let extra_accounts = (1..=2000u64)
+            .map(|i| {
+                let address = Address::from_word(B256::from(U256::from(i)));
+                (address, Account { nonce: 1, balance: U256::from(i), bytecode_hash: None })
+            })
+            .collect::<Vec<_>>();
+        runner
+            .db
+            .insert_accounts_and_storages(
+                extra_accounts
+                    .iter()
+                    .map(|(address, account)| (*address, (*account, std::iter::empty()))),
+            )
+            .unwrap();
+        let late_changes = extra_accounts.iter().step_by(10);
+        runner
+            .db
+            .insert_changesets(
+                [late_changes
+                    .clone()
+                    .map(|(address, account)| (*address, *account, Vec::new()))
+                    .collect::<Vec<_>>()],
+                Some(LATE_CHANGE_BLOCK),
+            )
+            .unwrap();
+        runner
+            .db
+            .insert_accounts_and_storages(late_changes.map(|(address, account)| {
+                let account = Account { balance: account.balance + U256::from(1), ..*account };
+                (*address, (account, std::iter::empty()))
+            }))
+            .unwrap();
+
+        // Give the start and target headers the roots of the widened state.
+        set_header_state_root(&runner.db, ROUND_TARGET, hashed_state_root(&runner.db).unwrap());
+        let target_hashed_state = hashed_state(&runner.db);
+        let to_round_start = UnwindInput {
+            checkpoint: StageCheckpoint::new(ROUND_TARGET),
+            unwind_to: ROUND_START,
+            bad_block: None,
+        };
+        runner.before_unwind(to_round_start).unwrap();
+        set_header_state_root(&runner.db, ROUND_START, hashed_state_root(&runner.db).unwrap());
+        restore_hashed_state(&runner.db, target_hashed_state.clone());
+
+        // Build the trie at the round start: merkelize the target, then unwind to the start.
+        execute_until_done(&runner, input).await.unwrap();
+        runner.before_unwind(to_round_start).unwrap();
+        runner.unwind(to_round_start).await.unwrap();
+        restore_hashed_state(&runner.db, target_hashed_state);
+
+        (runner, input)
+    }
+
+    /// Drives the stage to completion one committed call at a time, as the pipeline does.
+    async fn execute_until_done(
+        runner: &MerkleTestRunner,
+        mut input: ExecInput,
+    ) -> Result<ExecOutput, StageError> {
+        loop {
+            match runner.execute(input).await.unwrap()? {
+                ExecOutput { checkpoint, done: false } => input.checkpoint = Some(checkpoint),
+                output => return Ok(output),
+            }
+        }
+    }
+
+    type HashedState = (Vec<(B256, Account)>, Vec<(B256, StorageEntry)>);
+
+    fn hashed_state(db: &TestStageDB) -> HashedState {
+        db.query(|tx| {
+            let accounts = tx
+                .cursor_read::<tables::HashedAccounts>()?
+                .walk(None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let storages = tx
+                .cursor_dup_read::<tables::HashedStorages>()?
+                .walk(None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((accounts, storages))
+        })
+        .unwrap()
+    }
+
+    fn restore_hashed_state(db: &TestStageDB, (accounts, storages): HashedState) {
+        db.commit(|tx| {
+            tx.clear::<tables::HashedAccounts>()?;
+            tx.clear::<tables::HashedStorages>()?;
+            for (hashed_address, account) in accounts {
+                tx.put::<tables::HashedAccounts>(hashed_address, account)?;
+            }
+            for (hashed_address, entry) in storages {
+                tx.put::<tables::HashedStorages>(hashed_address, entry)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Computes the state root of the hashed state tables from scratch.
+    fn hashed_state_root(db: &TestStageDB) -> ProviderResult<B256> {
+        db.query(|tx| {
+            let mut accounts = BTreeMap::default();
+            let mut accounts_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
+            let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
+            for entry in accounts_cursor.walk_range(..)? {
+                let (key, account) = entry?;
+                let mut storage_entries = Vec::new();
+                let mut entry = storage_cursor.seek_exact(key)?;
+                while let Some((_, storage)) = entry {
+                    storage_entries.push(storage);
+                    entry = storage_cursor.next_dup()?;
+                }
+                let storage = storage_entries
+                    .into_iter()
+                    .filter(|v| !v.value.is_zero())
+                    .map(|v| (v.key, v.value))
+                    .collect::<Vec<_>>();
+                accounts.insert(key, (account, storage));
+            }
+
+            Ok(state_root_prehashed(accounts))
+        })
+    }
+
+    /// Rewrites the header of `block` with `state_root`, re-appending the headers after it.
+    fn set_header_state_root(db: &TestStageDB, block: BlockNumber, state_root: B256) {
+        let provider = db.factory.provider().unwrap();
+        let last = provider.last_block_number().unwrap();
+        let headers = (block..=last)
+            .map(|number| provider.header_by_number(number).unwrap().unwrap())
+            .collect::<Vec<_>>();
+        drop(provider);
+
+        let static_file_provider = db.factory.static_file_provider();
+        let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers).unwrap();
+        writer.prune_headers(headers.len() as u64).unwrap();
+        writer.commit().unwrap();
+        for (i, mut header) in headers.into_iter().enumerate() {
+            if i == 0 {
+                header.state_root = state_root;
+            }
+            let hash = header.hash_slow();
+            writer.append_header(&header, &hash).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
     struct MerkleTestRunner {
         db: TestStageDB,
         clean_threshold: u64,
@@ -758,29 +1083,7 @@ mod tests {
             self.db.insert_changesets(transitions, Some(start))?;
             self.db.insert_accounts_and_storages(final_state)?;
 
-            // Calculate state root
-            let root = self.db.query(|tx| {
-                let mut accounts = BTreeMap::default();
-                let mut accounts_cursor = tx.cursor_read::<tables::HashedAccounts>()?;
-                let mut storage_cursor = tx.cursor_dup_read::<tables::HashedStorages>()?;
-                for entry in accounts_cursor.walk_range(..)? {
-                    let (key, account) = entry?;
-                    let mut storage_entries = Vec::new();
-                    let mut entry = storage_cursor.seek_exact(key)?;
-                    while let Some((_, storage)) = entry {
-                        storage_entries.push(storage);
-                        entry = storage_cursor.next_dup()?;
-                    }
-                    let storage = storage_entries
-                        .into_iter()
-                        .filter(|v| !v.value.is_zero())
-                        .map(|v| (v.key, v.value))
-                        .collect::<Vec<_>>();
-                    accounts.insert(key, (account, storage));
-                }
-
-                Ok(state_root_prehashed(accounts))
-            })?;
+            let root = hashed_state_root(&self.db)?;
 
             let static_file_provider = self.db.factory.static_file_provider();
             let mut writer =
