@@ -1,10 +1,12 @@
 use eyre::Result;
+use reqwest::blocking::Client as BlockingClient;
 use reth_cli_util::cancellation::CancellationToken;
 use std::{
+    collections::BTreeSet,
     io::{self, Read, Write},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -362,33 +364,47 @@ fn format_eta(eta: Option<Duration>) -> String {
 /// Global request limit for the blocking downloader.
 ///
 /// This uses `Mutex + Condvar` because the segmented path runs blocking reqwest
-/// clients on OS threads. Slots are granted in arrival order: otherwise a worker that
-/// releases a slot takes it straight back before a woken waiter runs, and the waiter's
-/// piece can starve while it holds back an archive's contiguous downloaded prefix.
+/// clients on OS threads. Each slot owns one HTTP/1.1 client, so the command opens at most one
+/// connection and one client runtime thread per slot, however many archives it downloads.
+///
+/// Waiting requests are served first come first served. Arrival order matters: otherwise a thread
+/// that releases a slot takes it straight back before a woken waiter runs, and the waiter's piece
+/// can starve while it holds back an archive's contiguous downloaded prefix.
 pub(crate) struct DownloadRequestLimiter {
     /// Maximum number of in-flight HTTP requests.
     limit: usize,
-    /// Acquired slots and the arrival queue.
+    /// Free slots and waiting requests.
     state: Mutex<RequestLimiterState>,
     /// Wakes blocked threads when a slot is released.
     notify: Condvar,
+    /// HTTP client of each slot, built on the slot's first use.
+    clients: Vec<OnceLock<BlockingClient>>,
 }
 
-/// Slot accounting and FIFO tickets for [`DownloadRequestLimiter`].
-#[derive(Default)]
+/// Slot accounting and the wait queue for [`DownloadRequestLimiter`].
 struct RequestLimiterState {
-    /// Current number of acquired request slots.
-    active: usize,
+    /// Indices of slots not held by any permit.
+    free_slots: Vec<usize>,
     /// Ticket handed to the next caller of `acquire`.
     next_ticket: u64,
-    /// Ticket allowed to take the next free slot.
-    serving: u64,
+    /// Tickets of waiting requests; the first one takes the next free slot.
+    waiting: BTreeSet<u64>,
 }
 
 impl DownloadRequestLimiter {
     /// Creates the shared request limiter.
     pub(crate) fn new(limit: usize) -> Arc<Self> {
-        Arc::new(Self { limit: limit.max(1), state: Mutex::default(), notify: Condvar::new() })
+        let limit = limit.max(1);
+        Arc::new(Self {
+            limit,
+            state: Mutex::new(RequestLimiterState {
+                free_slots: (0..limit).rev().collect(),
+                next_ticket: 0,
+                waiting: BTreeSet::new(),
+            }),
+            notify: Condvar::new(),
+            clients: (0..limit).map(|_| OnceLock::new()).collect(),
+        })
     }
 
     /// Returns the configured request limit.
@@ -396,6 +412,7 @@ impl DownloadRequestLimiter {
         self.limit
     }
 
+    /// Waits for a free slot, serving waiters in arrival order.
     pub(crate) fn acquire<'a>(
         &'a self,
         progress: Option<&'a Arc<SharedProgress>>,
@@ -404,23 +421,26 @@ impl DownloadRequestLimiter {
         let mut state = self.state.lock().unwrap();
         let ticket = state.next_ticket;
         state.next_ticket += 1;
+        state.waiting.insert(ticket);
         loop {
-            // A cancelled waiter never takes its turn, which blocks later tickets. That is
-            // fine because cancellation is command-wide, so every waiter returns here too.
             if cancel_token.is_cancelled() {
+                state.waiting.remove(&ticket);
+                drop(state);
+                self.notify.notify_all();
                 return Err(eyre::eyre!("Download cancelled"));
             }
 
-            if state.serving == ticket && state.active < self.limit {
-                state.active += 1;
-                state.serving += 1;
+            if state.waiting.first() == Some(&ticket) &&
+                let Some(slot) = state.free_slots.pop()
+            {
+                state.waiting.remove(&ticket);
                 drop(state);
-                // The next ticket may also fit under the limit.
+                // The next waiter may also find a free slot.
                 self.notify.notify_all();
                 if let Some(progress) = progress {
                     progress.request_started();
                 }
-                return Ok(DownloadRequestPermit { limiter: self, progress });
+                return Ok(DownloadRequestPermit { limiter: self, slot, progress });
             }
 
             // Wake periodically so cancellation can interrupt waiters even if
@@ -439,17 +459,38 @@ impl DownloadRequestLimiter {
 pub(crate) struct DownloadRequestPermit<'a> {
     /// Limiter that owns the request slot.
     limiter: &'a DownloadRequestLimiter,
+    /// Index of the held slot.
+    slot: usize,
     /// Shared progress counters updated when the permit drops.
     progress: Option<&'a Arc<SharedProgress>>,
+}
+
+impl DownloadRequestPermit<'_> {
+    /// Returns the HTTP client of the held slot.
+    ///
+    /// Callers set per-request timeouts; the client keeps reqwest's default 30s timeout.
+    pub(crate) fn client(&self) -> Result<&BlockingClient> {
+        let slot = &self.limiter.clients[self.slot];
+        if let Some(client) = slot.get() {
+            return Ok(client)
+        }
+        // HTTP/2 would multiplex every request onto one TCP connection, which caps the
+        // download at a single connection's throughput. With HTTP/1.1 and one request at a
+        // time, each slot keeps one connection.
+        let client = BlockingClient::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .http1_only()
+            .build()?;
+        // Only the permit holder initializes its slot, so this cannot race.
+        Ok(slot.get_or_init(|| client))
+    }
 }
 
 impl Drop for DownloadRequestPermit<'_> {
     /// Releases the request slot and updates shared progress counters.
     fn drop(&mut self) {
-        let mut state = self.limiter.state.lock().unwrap();
-        state.active = state.active.saturating_sub(1);
-        drop(state);
-        // Only the waiter holding the serving ticket may proceed, so wake all of them.
+        self.limiter.state.lock().unwrap().free_slots.push(self.slot);
+        // Only the first waiter may take the slot, so wake all of them.
         self.limiter.notify.notify_all();
 
         if let Some(progress) = self.progress {

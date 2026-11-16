@@ -1,7 +1,7 @@
 use super::{
     progress::{
-        ArchiveDownloadProgress, DownloadProgress, DownloadRequestLimiter, SharedProgress,
-        SharedProgressWriter,
+        ArchiveDownloadProgress, DownloadProgress, DownloadRequestLimiter, DownloadRequestPermit,
+        SharedProgress, SharedProgressWriter,
     },
     session::DownloadSession,
     RETRY_BACKOFF_SECS,
@@ -21,6 +21,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, MutexGuard,
     },
+    thread,
     time::Duration,
 };
 use tracing::{info, warn};
@@ -160,13 +161,9 @@ impl ArchiveFetcher {
             return self.download_sequential(super::MAX_DOWNLOAD_RETRIES, download_progress)
         };
 
-        let client = BlockingClient::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .http1_only()
-            .build()?;
-        let probe = self.probe(&client)?;
+        let probe = self.probe(request_limiter)?;
 
-        match choose_fetch_strategy(probe, request_limiter.max_concurrency()) {
+        match choose_fetch_strategy(probe) {
             FetchStrategy::Sequential(reason) => {
                 self.log_sequential_fallback(reason, probe.total_size);
                 self.download_sequential(super::MAX_DOWNLOAD_RETRIES, download_progress)
@@ -183,7 +180,10 @@ impl ArchiveFetcher {
     }
 
     /// Probes the remote source for file size and HTTP range support.
-    fn probe(&self, client: &BlockingClient) -> Result<RemoteArchiveProbe> {
+    fn probe(&self, request_limiter: &DownloadRequestLimiter) -> Result<RemoteArchiveProbe> {
+        let permit =
+            request_limiter.acquire(self.session.progress(), self.session.cancel_token())?;
+        let client = permit.client()?;
         let mut attempt = 1;
         let probe = loop {
             let probe = client
@@ -233,8 +233,6 @@ impl ArchiveFetcher {
             info!(target: "reth::cli", file = %self.paths.file_name(), "Connecting to download server");
         }
 
-        let client =
-            BlockingClient::builder().timeout(Duration::from_secs(30)).http1_only().build()?;
         let mut total_size: Option<u64> = None;
         let mut last_error: Option<eyre::Error> = None;
 
@@ -256,21 +254,29 @@ impl ArchiveFetcher {
                 );
             }
 
-            let mut request = client.get(&self.url);
-            if existing_size > 0 {
-                request = request.header(RANGE, format!("bytes={existing_size}-"));
-                if !quiet && attempt == 1 {
-                    info!(target: "reth::cli", file = %self.paths.file_name(), "Resuming from {} bytes", existing_size);
-                }
-            }
-
-            let _request_permit = self
+            let request_permit = self
                 .session
                 .request_limiter()
                 .map(|limiter| {
                     limiter.acquire(self.session.progress(), self.session.cancel_token())
                 })
                 .transpose()?;
+            let fallback_client;
+            let client = match &request_permit {
+                Some(permit) => permit.client()?,
+                None => {
+                    fallback_client = BlockingClient::builder().http1_only().build()?;
+                    &fallback_client
+                }
+            };
+
+            let mut request = client.get(&self.url).timeout(Duration::from_secs(30));
+            if existing_size > 0 {
+                request = request.header(RANGE, format!("bytes={existing_size}-"));
+                if !quiet && attempt == 1 {
+                    info!(target: "reth::cli", file = %self.paths.file_name(), "Resuming from {} bytes", existing_size);
+                }
+            }
 
             let response = match request.send().and_then(|response| response.error_for_status()) {
                 Ok(response) => response,
@@ -394,7 +400,6 @@ impl ArchiveFetcher {
             total_size = %DownloadProgress::format_size(total_size),
             piece_size = %DownloadProgress::format_size(plan.piece_size),
             pieces = plan.piece_count,
-            workers = plan.worker_count,
             max_concurrent_requests = request_limiter.max_concurrency(),
             "Starting queued segmented download"
         );
@@ -658,7 +663,7 @@ enum FetchStrategy {
 }
 
 /// Chooses the fetch strategy from the remote probe and available worker budget.
-fn choose_fetch_strategy(probe: RemoteArchiveProbe, max_workers: usize) -> FetchStrategy {
+fn choose_fetch_strategy(probe: RemoteArchiveProbe) -> FetchStrategy {
     if !probe.supports_ranges {
         return FetchStrategy::Sequential(SequentialDownloadFallback::NoRangeSupport)
     }
@@ -667,7 +672,7 @@ fn choose_fetch_strategy(probe: RemoteArchiveProbe, max_workers: usize) -> Fetch
         return FetchStrategy::Sequential(SequentialDownloadFallback::EmptyFile)
     }
 
-    plan_segmented_download(probe.total_size, max_workers)
+    plan_segmented_download(probe.total_size)
         .map(FetchStrategy::Segmented)
         .unwrap_or(FetchStrategy::Sequential(SequentialDownloadFallback::TooSmall))
 }
@@ -709,20 +714,18 @@ struct DownloadPiece {
     end: u64,
 }
 
-/// Fixed plan for a segmented archive: piece size, piece count, and worker count.
+/// Fixed plan for a segmented archive: piece size and piece count.
 #[derive(Debug)]
 struct SegmentedDownloadPlan {
     /// Bytes assigned to each piece, except possibly the last.
     piece_size: u64,
     /// Number of pieces created for this archive.
     piece_count: usize,
-    /// Number of worker threads used for this archive.
-    worker_count: usize,
     /// Queue of pieces to download.
     pieces: VecDeque<DownloadPiece>,
 }
 
-/// Runs the segmented download workers and piece retries for one archive.
+/// Dispatches one archive's pieces to the shared request slots and retries failed pieces.
 struct SegmentedDownload {
     /// Remote archive URL.
     url: String,
@@ -730,29 +733,33 @@ struct SegmentedDownload {
     paths: DownloadPaths,
     /// Total archive size in bytes.
     total_size: u64,
-    /// Piece and worker plan for this archive.
+    /// Piece plan for this archive.
     plan: SegmentedDownloadPlan,
     /// Shared command-scoped download state.
     session: DownloadSession,
 }
 
-/// Shared inputs each segmented download worker needs while draining the piece queue.
+/// Shared inputs each piece download needs.
 #[derive(Clone, Copy)]
 struct SegmentedWorkerContext<'a> {
     /// Remote archive URL.
     url: &'a str,
-    /// Partial file path where pieces are written.
-    part_path: &'a Path,
+    /// Partial file where pieces are written.
+    file: &'a File,
     /// Shared progress counters for the whole command, when enabled.
     shared: Option<&'a Arc<SharedProgress>>,
-    /// Shared cap for in-flight HTTP requests.
-    request_limiter: &'a DownloadRequestLimiter,
     /// Cancellation token shared by the whole command.
     cancel_token: &'a CancellationToken,
     /// Session carrying the retry-delay override.
     session: &'a DownloadSession,
     /// Receives the contiguous downloaded prefix, when the archive is read while downloading.
     availability: Option<&'a ArchiveAvailability>,
+    /// Piece queue and completion state of this archive.
+    state: &'a SegmentedDownloadState,
+    /// First fatal piece error.
+    terminal_failure: &'a TerminalFailure,
+    /// Logical bytes of completed pieces, for shared progress.
+    piece_progress_bytes: &'a AtomicU64,
 }
 
 impl SegmentedDownload {
@@ -770,8 +777,11 @@ impl SegmentedDownload {
 
     /// Runs the segmented download to completion or returns the first fatal error.
     ///
-    /// Publishes the contiguous downloaded prefix to `availability` as pieces land, and stops
-    /// early once `availability` is aborted.
+    /// The calling thread waits for a request slot for one piece at a time, in file order, and
+    /// downloads each piece on its own thread while it holds the slot. The number of piece
+    /// threads and connections is therefore bounded by the shared request limit, not by the
+    /// number of archives. Publishes the contiguous downloaded prefix to `availability` as
+    /// pieces land, and stops early once `availability` is aborted.
     fn run(self, availability: Option<&ArchiveAvailability>) -> Result<DownloadedArchive> {
         let Self { url, paths, total_size, plan, session } = self;
         {
@@ -782,50 +792,41 @@ impl SegmentedDownload {
             availability.open(fs::open(paths.part_path())?, total_size);
         }
 
-        let worker_count = plan.worker_count;
-        let state = Arc::new(SegmentedDownloadState::new(plan.pieces));
-        let terminal_failure = Arc::new(TerminalFailure::default());
-        let piece_progress_bytes = Arc::new(AtomicU64::new(0));
-        // HTTP/2 would multiplex every piece request onto one TCP connection, which caps the
-        // download at a single connection's throughput. HTTP/1.1 opens one connection per
-        // in-flight piece.
-        let worker_client = BlockingClient::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(SEGMENTED_DOWNLOAD_REQUEST_TIMEOUT_SECS))
-            .http1_only()
-            .build()?;
-        let request_limiter = Arc::clone(session.require_request_limiter()?);
+        let file = OpenOptions::new()
+            .write(true)
+            .open(paths.part_path())
+            .map_err(|error| fs::FsPathError::open(error, paths.part_path()))?;
+        let state = SegmentedDownloadState::new(plan.pieces);
+        let terminal_failure = TerminalFailure::default();
+        let piece_progress_bytes = AtomicU64::new(0);
+        let request_limiter = session.require_request_limiter()?;
         let shared = session.progress();
         let cancel_token = session.cancel_token();
-        let url = url.as_str();
-        let worker_context = SegmentedWorkerContext {
-            url,
-            part_path: paths.part_path(),
-            session: &session,
+        let context = SegmentedWorkerContext {
+            url: &url,
+            file: &file,
             shared,
-            request_limiter: request_limiter.as_ref(),
             cancel_token,
+            session: &session,
             availability,
+            state: &state,
+            terminal_failure: &terminal_failure,
+            piece_progress_bytes: &piece_progress_bytes,
         };
 
         std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(worker_count);
+            let mut handles = Vec::new();
 
-            for _ in 0..worker_count {
-                let state = Arc::clone(&state);
-                let terminal_failure = Arc::clone(&terminal_failure);
-                let piece_progress_bytes = Arc::clone(&piece_progress_bytes);
-                let client = worker_client.clone();
-
-                handles.push(scope.spawn(move || {
-                    Self::worker_loop(
-                        &client,
-                        worker_context,
-                        state,
-                        terminal_failure,
-                        piece_progress_bytes,
-                    );
-                }));
+            while let Some(in_flight) = state.next_piece(cancel_token, availability) {
+                let permit = match request_limiter.acquire(shared, cancel_token) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        state.note_terminal_failure();
+                        terminal_failure.record(error);
+                        break
+                    }
+                };
+                handles.push(scope.spawn(move || Self::download_piece(context, in_flight, permit)));
             }
 
             for handle in handles {
@@ -862,76 +863,63 @@ impl SegmentedDownload {
         Ok(DownloadedArchive { path: paths.final_path().to_path_buf(), size: total_size })
     }
 
-    /// Runs one worker until there are no pieces left or another worker fails.
-    fn worker_loop(
-        client: &BlockingClient,
+    /// Downloads one piece with the request slot `permit`, then records the outcome.
+    fn download_piece(
         context: SegmentedWorkerContext<'_>,
-        state: Arc<SegmentedDownloadState>,
-        terminal_failure: Arc<TerminalFailure>,
-        piece_progress_bytes: Arc<AtomicU64>,
+        in_flight: InFlightPiece<'_>,
+        permit: DownloadRequestPermit<'_>,
     ) {
-        let file = match OpenOptions::new().write(true).open(context.part_path) {
-            Ok(file) => file,
-            Err(error) => {
-                state.note_terminal_failure();
-                terminal_failure.record(error.into());
-                return;
-            }
-        };
-
-        while !context.availability.is_some_and(ArchiveAvailability::is_aborted) &&
-            let Some(piece) = state.next_piece(context.cancel_token)
-        {
-            match Self::download_piece_with_retries(
+        let piece = in_flight.piece;
+        let result = permit.client().map_err(PieceAttemptFailure::Terminal).and_then(|client| {
+            Self::download_piece_with_retries(
                 client,
                 context.url,
-                &file,
+                context.file,
                 piece,
                 context.shared,
-                &piece_progress_bytes,
-                context.request_limiter,
+                context.piece_progress_bytes,
                 context.cancel_token,
                 context.session,
-            ) {
-                Ok(()) => {
-                    let prefix = state.complete(piece);
-                    if let Some(availability) = context.availability {
-                        availability.publish(prefix);
-                    }
+            )
+        });
+        drop(permit);
+
+        match result {
+            Ok(()) => {
+                let prefix = context.state.complete(piece);
+                if let Some(availability) = context.availability {
+                    availability.publish(prefix);
                 }
-                Err(PieceAttemptFailure::Retryable { error, .. }) if state.requeue(piece) => {
-                    warn!(target: "reth::cli",
-                        start = piece.start,
-                        end = piece.end,
-                        %error,
-                        "Piece download failed, requeued"
-                    );
-                }
-                Err(
-                    PieceAttemptFailure::Retryable { error, .. } |
-                    PieceAttemptFailure::Terminal(error),
-                ) => {
-                    state.note_terminal_failure();
-                    terminal_failure.record(error);
-                    return;
-                }
+            }
+            Err(PieceAttemptFailure::Retryable { error, .. }) if context.state.requeue(piece) => {
+                warn!(target: "reth::cli",
+                    start = piece.start,
+                    end = piece.end,
+                    %error,
+                    "Piece download failed, requeued"
+                );
+            }
+            Err(
+                PieceAttemptFailure::Retryable { error, .. } | PieceAttemptFailure::Terminal(error),
+            ) => {
+                context.state.note_terminal_failure();
+                context.terminal_failure.record(error);
             }
         }
     }
 
     /// Downloads one queued piece with per-piece retry/backoff.
     ///
-    /// Each attempt acquires a permit from the shared request limit so whole-file and
-    /// piece downloads use the same fixed number of HTTP request slots.
+    /// The caller holds a slot of the shared request limit for every attempt and backoff, so
+    /// whole-file and piece downloads use the same fixed number of HTTP request slots.
     #[expect(clippy::too_many_arguments)]
     fn download_piece_with_retries(
         client: &BlockingClient,
         url: &str,
-        file: &std::fs::File,
+        file: &File,
         piece: DownloadPiece,
         shared: Option<&Arc<SharedProgress>>,
         piece_progress_bytes: &AtomicU64,
-        request_limiter: &DownloadRequestLimiter,
         cancel_token: &CancellationToken,
         session: &DownloadSession,
     ) -> std::result::Result<(), PieceAttemptFailure> {
@@ -940,9 +928,6 @@ impl SegmentedDownload {
                 return Err(PieceAttemptFailure::Terminal(eyre::eyre!("Download cancelled")))
             }
 
-            let _request_permit = request_limiter
-                .acquire(shared, cancel_token)
-                .map_err(PieceAttemptFailure::Terminal)?;
             match Self::download_piece_once(
                 client,
                 url,
@@ -984,6 +969,7 @@ impl SegmentedDownload {
         let response = match client
             .get(url)
             .header(RANGE, format!("bytes={}-{}", piece.start, piece.end))
+            .timeout(Duration::from_secs(SEGMENTED_DOWNLOAD_REQUEST_TIMEOUT_SECS))
             .send()
         {
             Ok(response) if response.status() == StatusCode::PARTIAL_CONTENT => response,
@@ -1065,16 +1051,46 @@ impl SegmentedDownload {
 
 /// Shared queue state for one segmented archive download.
 ///
-/// Workers pull pieces until the queue is empty or one worker fails the whole attempt.
+/// The dispatcher takes pieces until the queue is empty and no piece can be requeued, or one
+/// piece fails the whole attempt.
 struct SegmentedDownloadState {
-    /// Remaining pieces waiting to be downloaded.
-    pieces: Mutex<VecDeque<DownloadPiece>>,
-    /// Set once a worker hits a fatal error.
+    /// Pieces waiting to be downloaded and pieces in flight.
+    queue: Mutex<PieceQueue>,
+    /// Wakes the dispatcher when a piece finishes or the attempt fails.
+    changed: Condvar,
+    /// Set once a piece hits a fatal error.
     failed: AtomicBool,
     /// Remaining number of times a piece that exhausted its retries may be requeued.
     requeues_left: AtomicU64,
     /// Downloaded pieces and the contiguous prefix they form.
     completed: Mutex<CompletedPieces>,
+}
+
+/// Pieces of one segmented archive that are not downloaded yet.
+struct PieceQueue {
+    /// Pieces waiting to be downloaded, in file order except for requeued pieces at the front.
+    pieces: VecDeque<DownloadPiece>,
+    /// Pieces taken from the queue whose download has not finished.
+    in_flight: usize,
+}
+
+/// A piece taken from the queue; dropping it marks the piece as no longer in flight.
+struct InFlightPiece<'a> {
+    /// Queue the piece was taken from.
+    state: &'a SegmentedDownloadState,
+    /// The piece to download.
+    piece: DownloadPiece,
+}
+
+impl Drop for InFlightPiece<'_> {
+    fn drop(&mut self) {
+        // A panicking piece download can no longer complete its piece.
+        if thread::panicking() {
+            self.state.note_terminal_failure();
+        }
+        self.state.queue.lock().unwrap().in_flight -= 1;
+        self.state.changed.notify_all();
+    }
 }
 
 /// Downloaded pieces of one segmented archive.
@@ -1091,7 +1107,8 @@ impl SegmentedDownloadState {
     fn new(pieces: VecDeque<DownloadPiece>) -> Self {
         let requeues_left = AtomicU64::new(pieces.len() as u64);
         Self {
-            pieces: Mutex::new(pieces),
+            queue: Mutex::new(PieceQueue { pieces, in_flight: 0 }),
+            changed: Condvar::new(),
             failed: AtomicBool::new(false),
             requeues_left,
             completed: Mutex::default(),
@@ -1110,7 +1127,7 @@ impl SegmentedDownloadState {
         {
             return false
         }
-        self.pieces.lock().unwrap().push_front(piece);
+        self.queue.lock().unwrap().pieces.push_front(piece);
         true
     }
 
@@ -1125,18 +1142,41 @@ impl SegmentedDownloadState {
         completed.prefix
     }
 
-    /// Returns the next piece unless cancellation or a fatal error stopped the attempt.
-    fn next_piece(&self, cancel_token: &CancellationToken) -> Option<DownloadPiece> {
-        if cancel_token.is_cancelled() || self.failed.load(Ordering::Relaxed) {
-            return None;
+    /// Takes the next piece, waiting while the queue is empty but an in-flight piece may still
+    /// be requeued.
+    ///
+    /// Returns `None` once every piece is downloaded, or when cancellation, a fatal error, or
+    /// an aborted `availability` stopped the attempt.
+    fn next_piece(
+        &self,
+        cancel_token: &CancellationToken,
+        availability: Option<&ArchiveAvailability>,
+    ) -> Option<InFlightPiece<'_>> {
+        let mut queue = self.queue.lock().unwrap();
+        loop {
+            if cancel_token.is_cancelled() ||
+                self.failed.load(Ordering::Relaxed) ||
+                availability.is_some_and(ArchiveAvailability::is_aborted)
+            {
+                return None
+            }
+            if let Some(piece) = queue.pieces.pop_front() {
+                queue.in_flight += 1;
+                return Some(InFlightPiece { state: self, piece })
+            }
+            if queue.in_flight == 0 {
+                return None
+            }
+            // Wake periodically so cancellation and aborts are observed without a piece
+            // finishing.
+            queue = self.changed.wait_timeout(queue, Duration::from_millis(100)).unwrap().0;
         }
-
-        self.pieces.lock().unwrap().pop_front()
     }
 
-    /// Marks the entire segmented attempt as failed so workers stop taking more pieces.
+    /// Marks the entire segmented attempt as failed so the dispatcher stops taking more pieces.
     fn note_terminal_failure(&self) {
         self.failed.store(true, Ordering::Relaxed);
+        self.changed.notify_all();
     }
 }
 
@@ -1192,8 +1232,8 @@ fn segmented_piece_size(total_size: u64) -> u64 {
 ///
 /// Small files stay single-stream. Larger files are split into fixed pieces and
 /// can use up to the shared request limit.
-fn plan_segmented_download(total_size: u64, max_workers: usize) -> Option<SegmentedDownloadPlan> {
-    if max_workers == 0 || total_size < SEGMENTED_DOWNLOAD_MIN_FILE_SIZE {
+fn plan_segmented_download(total_size: u64) -> Option<SegmentedDownloadPlan> {
+    if total_size < SEGMENTED_DOWNLOAD_MIN_FILE_SIZE {
         return None;
     }
 
@@ -1204,9 +1244,8 @@ fn plan_segmented_download(total_size: u64, max_workers: usize) -> Option<Segmen
 
     let pieces = build_download_pieces(total_size, piece_size);
     let piece_count = pieces.len();
-    let worker_count = max_workers.min(piece_count).max(1);
 
-    Some(SegmentedDownloadPlan { piece_size, piece_count, worker_count, pieces })
+    Some(SegmentedDownloadPlan { piece_size, piece_count, pieces })
 }
 
 /// Returns the retry backoff for one piece attempt.
@@ -1271,17 +1310,16 @@ mod tests {
 
     #[test]
     fn segmented_plan_skips_small_files() {
-        assert!(plan_segmented_download(SEGMENTED_DOWNLOAD_MIN_FILE_SIZE - 1, 16).is_none());
+        assert!(plan_segmented_download(SEGMENTED_DOWNLOAD_MIN_FILE_SIZE - 1).is_none());
     }
 
     #[test]
-    fn segmented_plan_uses_large_pieces_and_adaptive_workers() {
+    fn segmented_plan_uses_small_pieces_below_two_gib() {
         let total_size = 512 * 1024 * 1024;
-        let plan = plan_segmented_download(total_size, 32).unwrap();
+        let plan = plan_segmented_download(total_size).unwrap();
 
         assert_eq!(plan.piece_size, SEGMENTED_DOWNLOAD_SMALL_PIECE_SIZE);
         assert_eq!(plan.piece_count, 16);
-        assert_eq!(plan.worker_count, 16);
     }
 
     #[test]
@@ -1308,20 +1346,20 @@ mod tests {
 
     #[test]
     fn choose_fetch_strategy_uses_segmented_when_ranges_are_supported() {
-        let strategy = choose_fetch_strategy(
-            RemoteArchiveProbe { total_size: 512 * 1024 * 1024, supports_ranges: true },
-            16,
-        );
+        let strategy = choose_fetch_strategy(RemoteArchiveProbe {
+            total_size: 512 * 1024 * 1024,
+            supports_ranges: true,
+        });
 
         assert!(matches!(strategy, FetchStrategy::Segmented(_)));
     }
 
     #[test]
     fn choose_fetch_strategy_falls_back_without_ranges() {
-        let strategy = choose_fetch_strategy(
-            RemoteArchiveProbe { total_size: 512 * 1024 * 1024, supports_ranges: false },
-            16,
-        );
+        let strategy = choose_fetch_strategy(RemoteArchiveProbe {
+            total_size: 512 * 1024 * 1024,
+            supports_ranges: false,
+        });
 
         assert!(matches!(
             strategy,
@@ -1356,12 +1394,12 @@ mod tests {
     fn segmented_state_requeues_failed_pieces_within_budget() {
         let state = SegmentedDownloadState::new(build_download_pieces(8, 4));
         let token = CancellationToken::new();
-        let first = state.next_piece(&token).unwrap();
+        let first = state.next_piece(&token, None).unwrap().piece;
 
         assert!(state.requeue(first));
         assert!(state.requeue(first));
         assert!(!state.requeue(first));
-        assert_eq!(state.pieces.lock().unwrap().front(), Some(&first));
+        assert_eq!(state.queue.lock().unwrap().pieces.front(), Some(&first));
     }
 
     #[test]
