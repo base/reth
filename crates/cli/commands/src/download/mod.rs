@@ -138,7 +138,7 @@ const SNAPSHOT_API_PATH: &str = "/api/snapshots";
 const MANAGED_DATADIR_PATHS: &[&str] = &["db", "rocksdb", "static_files", "reth.toml"];
 
 /// Maximum number of simultaneous HTTP downloads across the entire snapshot job.
-const MAX_CONCURRENT_DOWNLOADS: usize = 8;
+const MAX_CONCURRENT_DOWNLOADS: usize = 32;
 
 /// Built-in component presets for snapshot selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
