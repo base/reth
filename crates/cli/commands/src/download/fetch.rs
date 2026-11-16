@@ -1,7 +1,7 @@
 use super::{
     progress::{
         ArchiveDownloadProgress, DownloadProgress, DownloadRequestLimiter, DownloadRequestPermit,
-        SharedProgress, SharedProgressWriter,
+        RequestPriority, SharedProgress, SharedProgressWriter,
     },
     session::DownloadSession,
     RETRY_BACKOFF_SECS,
@@ -181,8 +181,12 @@ impl ArchiveFetcher {
 
     /// Probes the remote source for file size and HTTP range support.
     fn probe(&self, request_limiter: &DownloadRequestLimiter) -> Result<RemoteArchiveProbe> {
-        let permit =
-            request_limiter.acquire(self.session.progress(), self.session.cancel_token())?;
+        // Probes are single-byte requests that let an archive start, so they go first.
+        let permit = request_limiter.acquire(
+            self.session.progress(),
+            self.session.cancel_token(),
+            RequestPriority::new(u64::MAX, None),
+        )?;
         let client = permit.client()?;
         let mut attempt = 1;
         let probe = loop {
@@ -254,11 +258,17 @@ impl ArchiveFetcher {
                 );
             }
 
+            // Sequential downloads are smaller than the segmented minimum unless the server lacks
+            // range support, so they rank behind larger archives.
             let request_permit = self
                 .session
                 .request_limiter()
                 .map(|limiter| {
-                    limiter.acquire(self.session.progress(), self.session.cancel_token())
+                    limiter.acquire(
+                        self.session.progress(),
+                        self.session.cancel_token(),
+                        RequestPriority::new(0, None),
+                    )
                 })
                 .transpose()?;
             let fallback_client;
@@ -481,6 +491,8 @@ pub(crate) struct ArchiveAvailability {
     state: Mutex<AvailabilityState>,
     /// Wakes readers when the state changes.
     changed: Condvar,
+    /// Archive bytes the reader has consumed.
+    consumed: AtomicU64,
 }
 
 /// Fetch state shared between one archive download and its reader.
@@ -553,6 +565,15 @@ impl ArchiveAvailability {
     /// after the fetch returns early or unwinds.
     pub(crate) fn abort_on_drop(&self) -> ArchiveAvailabilityAbortGuard<'_> {
         ArchiveAvailabilityAbortGuard(self)
+    }
+
+    /// Returns how far the published prefix is ahead of the reader, in bytes.
+    pub(crate) fn extraction_lead(&self) -> u64 {
+        let available = match *self.lock() {
+            AvailabilityState::Open { available, .. } => available,
+            AvailabilityState::Pending | AvailabilityState::Aborted => 0,
+        };
+        available.saturating_sub(self.consumed.load(Ordering::Relaxed))
     }
 
     /// Returns whether the archive was aborted.
@@ -629,6 +650,7 @@ impl Read for ArchiveAvailabilityReader<'_> {
             ))
         }
         self.position += read as u64;
+        self.availability.consumed.store(self.position, Ordering::Relaxed);
         Ok(read)
     }
 }
@@ -802,6 +824,7 @@ impl SegmentedDownload {
         let request_limiter = session.require_request_limiter()?;
         let shared = session.progress();
         let cancel_token = session.cancel_token();
+        let priority = RequestPriority::new(total_size, availability);
         let context = SegmentedWorkerContext {
             url: &url,
             file: &file,
@@ -818,7 +841,7 @@ impl SegmentedDownload {
             let mut handles = Vec::new();
 
             while let Some(in_flight) = state.next_piece(cancel_token, availability) {
-                let permit = match request_limiter.acquire(shared, cancel_token) {
+                let permit = match request_limiter.acquire(shared, cancel_token, priority) {
                     Ok(permit) => permit,
                     Err(error) => {
                         state.note_terminal_failure();
@@ -1452,5 +1475,50 @@ mod tests {
 
         let error = reader.read(&mut buf).unwrap_err();
         assert_eq!(error.to_string(), "archive download stopped before completing");
+    }
+
+    #[test]
+    fn request_slots_feed_a_large_archive_extractor_ahead_of_small_archives() {
+        const GIB: u64 = 1 << 30;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.part");
+        std::fs::write(&path, []).unwrap();
+        let large = ArchiveAvailability::default();
+        large.open(fs::open(&path).unwrap(), 700 * GIB);
+        let small = ArchiveAvailability::default();
+        small.open(fs::open(&path).unwrap(), GIB);
+
+        // Returns the order in which small archives and then the large archive, queued behind
+        // them, get the only slot.
+        let serve_order = || {
+            let limiter = DownloadRequestLimiter::new(1);
+            let token = CancellationToken::new();
+            let order = Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                let held = limiter.acquire(None, &token, RequestPriority::new(0, None)).unwrap();
+                let queue = |name, priority, waiting| {
+                    let (limiter, token, order) = (&limiter, &token, &order);
+                    scope.spawn(move || {
+                        let _permit = limiter.acquire(None, token, priority).unwrap();
+                        order.lock().unwrap().push(name);
+                    });
+                    while limiter.waiting_requests() < waiting {
+                        std::thread::yield_now();
+                    }
+                };
+                for waiting in 1..=3 {
+                    queue("small", RequestPriority::new(GIB, Some(&small)), waiting);
+                }
+                queue("large", RequestPriority::new(700 * GIB, Some(&large)), 4);
+                drop(held);
+            });
+            order.into_inner().unwrap()
+        };
+
+        assert_eq!(serve_order(), ["large", "small", "small", "small"]);
+
+        // Once its extractor has a full window to read, the large archive yields.
+        large.publish(9 * GIB);
+        assert_eq!(serve_order(), ["small", "small", "small", "large"]);
     }
 }

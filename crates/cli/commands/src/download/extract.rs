@@ -2,7 +2,7 @@ use super::{
     fetch::{ArchiveFetcher, DownloadedArchive},
     progress::{
         ArchiveExtractionProgress, ArchiveExtractionProgressHandle, DownloadProgress,
-        DownloadRequestLimiter, ProgressReader, SharedProgressReader,
+        DownloadRequestLimiter, ProgressReader, RequestPriority, SharedProgressReader,
     },
     session::DownloadSession,
     MAX_DOWNLOAD_RETRIES, RETRY_BACKOFF_SECS,
@@ -398,7 +398,13 @@ pub(crate) fn streaming_download_and_extract(
         let client = BlockingClient::builder().connect_timeout(Duration::from_secs(30)).build()?;
         let _request_permit = session
             .request_limiter()
-            .map(|limiter| limiter.acquire(session.progress(), session.cancel_token()))
+            .map(|limiter| {
+                limiter.acquire(
+                    session.progress(),
+                    session.cancel_token(),
+                    RequestPriority::new(0, None),
+                )
+            })
             .transpose()?;
 
         let response = match client.get(url).send().and_then(|r| r.error_for_status()) {

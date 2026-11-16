@@ -1,7 +1,9 @@
+use super::fetch::ArchiveAvailability;
 use eyre::Result;
 use reqwest::blocking::Client as BlockingClient;
 use reth_cli_util::cancellation::CancellationToken;
 use std::{
+    cmp::Reverse,
     collections::BTreeSet,
     io::{self, Read, Write},
     sync::{
@@ -361,15 +363,22 @@ fn format_eta(eta: Option<Duration>) -> String {
     eta.map(DownloadProgress::format_duration).unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Extraction lead below which an archive's requests are urgent.
+///
+/// An archive whose downloaded-but-unextracted bytes are below this window risks idling its
+/// single-threaded extractor, so its requests go ahead of archives that are further ahead.
+const EXTRACTION_LEAD_WINDOW: u64 = 8 << 30;
+
 /// Global request limit for the blocking downloader.
 ///
 /// This uses `Mutex + Condvar` because the segmented path runs blocking reqwest
 /// clients on OS threads. Each slot owns one HTTP/1.1 client, so the command opens at most one
 /// connection and one client runtime thread per slot, however many archives it downloads.
 ///
-/// Waiting requests are served first come first served. Arrival order matters: otherwise a thread
-/// that releases a slot takes it straight back before a woken waiter runs, and the waiter's piece
-/// can starve while it holds back an archive's contiguous downloaded prefix.
+/// Waiting requests are served by [`RequestPriority`], first come first served within the same
+/// priority. Arrival order matters: otherwise a thread that releases a slot takes it straight
+/// back before a woken waiter runs, and the waiter's piece can starve while it holds back an
+/// archive's contiguous downloaded prefix.
 pub(crate) struct DownloadRequestLimiter {
     /// Maximum number of in-flight HTTP requests.
     limit: usize,
@@ -387,8 +396,54 @@ struct RequestLimiterState {
     free_slots: Vec<usize>,
     /// Ticket handed to the next caller of `acquire`.
     next_ticket: u64,
-    /// Tickets of waiting requests; the first one takes the next free slot.
-    waiting: BTreeSet<u64>,
+    /// Waiting requests; the first one takes the next free slot.
+    waiting: BTreeSet<RequestKey>,
+}
+
+/// How [`DownloadRequestLimiter`] orders one waiting request.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestPriority<'a> {
+    /// Size of the archive the request downloads.
+    archive_size: u64,
+    /// Extraction progress of the archive, when it is extracted while downloading.
+    availability: Option<&'a ArchiveAvailability>,
+}
+
+impl<'a> RequestPriority<'a> {
+    /// Creates the priority of a request for an archive of `archive_size` bytes.
+    ///
+    /// Requests whose archive extractor is within [`EXTRACTION_LEAD_WINDOW`] of the downloaded
+    /// prefix, or that have no extractor to feed, go first, and among those the largest
+    /// archive goes first because its single-threaded extraction is the critical path. Requests
+    /// whose extractor is further ahead wait until no urgent request is waiting.
+    pub(crate) const fn new(
+        archive_size: u64,
+        availability: Option<&'a ArchiveAvailability>,
+    ) -> Self {
+        Self { archive_size, availability }
+    }
+
+    /// Returns the queue position of this request for `ticket`.
+    fn key(&self, ticket: u64) -> RequestKey {
+        RequestKey {
+            extractor_ahead: self.availability.is_some_and(|availability| {
+                availability.extraction_lead() >= EXTRACTION_LEAD_WINDOW
+            }),
+            archive_size: Reverse(self.archive_size),
+            ticket,
+        }
+    }
+}
+
+/// Queue position of a waiting request, smallest first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestKey {
+    /// Whether the archive's extractor already has [`EXTRACTION_LEAD_WINDOW`] bytes to read.
+    extractor_ahead: bool,
+    /// Archive size, largest first.
+    archive_size: Reverse<u64>,
+    /// Arrival order.
+    ticket: u64,
 }
 
 impl DownloadRequestLimiter {
@@ -412,28 +467,45 @@ impl DownloadRequestLimiter {
         self.limit
     }
 
-    /// Waits for a free slot, serving waiters in arrival order.
+    /// Returns the number of requests waiting for a slot.
+    #[cfg(test)]
+    pub(crate) fn waiting_requests(&self) -> usize {
+        self.state.lock().unwrap().waiting.len()
+    }
+
+    /// Waits for a free slot, serving waiters in [`RequestPriority`] order.
     pub(crate) fn acquire<'a>(
         &'a self,
         progress: Option<&'a Arc<SharedProgress>>,
         cancel_token: &CancellationToken,
+        priority: RequestPriority<'_>,
     ) -> Result<DownloadRequestPermit<'a>> {
         let mut state = self.state.lock().unwrap();
         let ticket = state.next_ticket;
         state.next_ticket += 1;
-        state.waiting.insert(ticket);
+        let mut key = priority.key(ticket);
+        state.waiting.insert(key);
         loop {
             if cancel_token.is_cancelled() {
-                state.waiting.remove(&ticket);
+                state.waiting.remove(&key);
                 drop(state);
                 self.notify.notify_all();
                 return Err(eyre::eyre!("Download cancelled"));
             }
 
-            if state.waiting.first() == Some(&ticket) &&
+            // An archive's priority changes as its extractor catches up, so re-rank on every
+            // wake.
+            let current = priority.key(ticket);
+            if current != key {
+                state.waiting.remove(&key);
+                state.waiting.insert(current);
+                key = current;
+            }
+
+            if state.waiting.first() == Some(&key) &&
                 let Some(slot) = state.free_slots.pop()
             {
-                state.waiting.remove(&ticket);
+                state.waiting.remove(&key);
                 drop(state);
                 // The next waiter may also find a free slot.
                 self.notify.notify_all();
@@ -443,7 +515,7 @@ impl DownloadRequestLimiter {
                 return Ok(DownloadRequestPermit { limiter: self, slot, progress });
             }
 
-            // Wake periodically so cancellation can interrupt waiters even if
+            // Wake periodically so cancellation and priority changes are observed even if
             // no request finishes.
             let (next_state, _) =
                 self.notify.wait_timeout(state, Duration::from_millis(100)).unwrap();
@@ -925,9 +997,9 @@ mod tests {
         let order = Mutex::new(Vec::new());
 
         std::thread::scope(|scope| {
-            let held = limiter.acquire(None, &token).unwrap();
+            let held = limiter.acquire(None, &token, RequestPriority::new(0, None)).unwrap();
             scope.spawn(|| {
-                let _permit = limiter.acquire(None, &token).unwrap();
+                let _permit = limiter.acquire(None, &token, RequestPriority::new(0, None)).unwrap();
                 order.lock().unwrap().push("waiter");
             });
             while limiter.state.lock().unwrap().next_ticket < 2 {
@@ -936,7 +1008,7 @@ mod tests {
 
             // Re-acquiring right after a release must not jump ahead of the queued waiter.
             drop(held);
-            let _permit = limiter.acquire(None, &token).unwrap();
+            let _permit = limiter.acquire(None, &token, RequestPriority::new(0, None)).unwrap();
             order.lock().unwrap().push("releaser");
         });
 
