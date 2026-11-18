@@ -1149,8 +1149,7 @@ where
         output: &BlockExecutionOutput<N::Receipt>,
         outcome: StateRootComputeOutcome,
     ) -> StateRootJobOutcome {
-        let StateRootComputeOutcome { state_root, trie_updates, hashed_state: _hashed_state } =
-            outcome;
+        let StateRootComputeOutcome { state_root, trie_updates, .. } = outcome;
 
         if self.compare_trie_updates {
             compare_trie_updates_with_serial(
@@ -1424,6 +1423,8 @@ mod tests {
                 let (result_tx, result_rx) = mpsc::channel();
                 result_tx
                     .send(Ok(StateRootComputeOutcome {
+                        worker_elapsed: Default::default(),
+                        worker_idle: Default::default(),
                         state_root: if matching_root { block.state_root } else { B256::ZERO },
                         trie_updates: Default::default(),
                         hashed_state: Default::default(),

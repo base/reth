@@ -503,6 +503,8 @@ where
         self.storage_cache_misses = 0;
 
         Ok(StateRootComputeOutcome {
+            worker_elapsed: end.duration_since(now),
+            worker_idle: total_idle_time,
             state_root,
             trie_updates: Arc::new(trie_updates),
             hashed_state: finalized_hashed_state
