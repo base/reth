@@ -14,7 +14,7 @@ use reth_trie::{
     updates::TrieUpdates, HashedPostState, HashedStorage, MultiProofTargetsV2, ProofV2Target,
 };
 use revm::state::EvmState;
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 use tracing::trace;
 
 /// Messages used internally by the multi proof task.
@@ -37,6 +37,10 @@ pub enum StateRootMessage {
 /// the trie updates.
 #[derive(Debug, Clone)]
 pub struct StateRootComputeOutcome {
+    /// Wall time from sparse trie worker start to the finalized root (includes channel waits).
+    pub worker_elapsed: Duration,
+    /// Time the worker waited for state updates, proofs, or completed storage jobs.
+    pub worker_idle: Duration,
     /// The state root.
     pub state_root: B256,
     /// The trie updates.
@@ -905,6 +909,8 @@ mod tests {
 
         state_root_tx
             .send(Ok(StateRootComputeOutcome {
+                worker_elapsed: Default::default(),
+                worker_idle: Default::default(),
                 state_root: B256::repeat_byte(0x42),
                 trie_updates: Arc::new(TrieUpdates::default()),
                 hashed_state: Arc::new(HashedPostState::default()),

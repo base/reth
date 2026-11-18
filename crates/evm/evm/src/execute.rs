@@ -27,6 +27,9 @@ use revm::{
     state::bal::Bal,
 };
 
+#[cfg(feature = "metrics")]
+use std::time::{Duration, Instant};
+
 /// A type that knows how to execute a block. It is assumed to operate on a
 /// [`crate::Evm`] internally and use [`State`] as database.
 pub trait Executor<DB: Database>: Sized {
@@ -303,9 +306,24 @@ pub trait BlockAssembler<F: BlockExecutorFactory> {
     ) -> Result<Self::Block, BlockExecutionError>;
 }
 
+/// Wall-clock timings inside a successful block build, excluding header assembly.
+#[cfg(feature = "metrics")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockFinalizationTimings {
+    /// Merging execution transitions into the bundle state.
+    pub merge_transitions: Duration,
+    /// Hashing the merged post-state.
+    pub hash_post_state: Duration,
+    /// The state provider's root-with-updates call, absent when a precomputed root was used.
+    pub synchronous_root: Option<Duration>,
+}
+
 /// Output of block building.
 #[derive(Debug, Clone)]
 pub struct BlockBuilderOutcome<N: NodePrimitives> {
+    /// Timings for finalization work performed by the builder.
+    #[cfg(feature = "metrics")]
+    pub timings: BlockFinalizationTimings,
     /// Result of block execution.
     pub execution_result: BlockExecutionResult<N::Receipt>,
     /// Hashed state after execution.
@@ -509,7 +527,11 @@ where
         let (db, evm_env) = evm.finish();
 
         // merge all transitions into bundle state
+        #[cfg(feature = "metrics")]
+        let start = Instant::now();
         db.merge_transitions(BundleRetention::Reverts);
+        #[cfg(feature = "metrics")]
+        let merge_transitions = start.elapsed();
 
         // Encode the built BAL once and keep the bytes, so callers don't re-encode it.
         let block_access_list = db.take_built_alloy_bal().map(|bal| {
@@ -519,13 +541,30 @@ where
         });
         let block_access_list_hash = block_access_list.as_ref().map(DecodedBal::hash);
 
+        #[cfg(feature = "metrics")]
+        let start = Instant::now();
         let hashed_state =
             state.hashed_post_state(&db.bundle_state).map_err(BlockExecutionError::other)?;
+        #[cfg(feature = "metrics")]
+        let mut timings = BlockFinalizationTimings {
+            merge_transitions,
+            hash_post_state: start.elapsed(),
+            synchronous_root: None,
+        };
         let (state_root, trie_updates) = match state_root_precomputed {
             Some(precomputed) => precomputed,
-            None => state
-                .state_root_with_updates(hashed_state.clone())
-                .map_err(BlockExecutionError::other)?,
+            None => {
+                let input = hashed_state.clone();
+                #[cfg(feature = "metrics")]
+                let start = Instant::now();
+                let root =
+                    state.state_root_with_updates(input).map_err(BlockExecutionError::other)?;
+                #[cfg(feature = "metrics")]
+                {
+                    timings.synchronous_root = Some(start.elapsed());
+                }
+                root
+            }
         };
 
         let (transactions, senders) =
@@ -546,6 +585,8 @@ where
         let block = RecoveredBlock::new_unhashed(block, senders);
 
         Ok(BlockBuilderOutcome {
+            #[cfg(feature = "metrics")]
+            timings,
             execution_result: result,
             hashed_state,
             trie_updates,
